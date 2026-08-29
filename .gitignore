@@ -1,0 +1,20 @@
+# 构建产物
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 开发素材（AI 原始图）
+raw/
+
+# 工作区数据
+.workbuddy/
+
+# 临时诊断日志
+lingxi_diag.log
+lingxi_tray_diag.log
+@AutomationLog.txt
