@@ -210,6 +210,97 @@ def get_click_messages():
     return CLICK_MESSAGES
 
 
+# 动作切换台词（状态机切换时弹气泡，增强互动性）
+# 结构：{state: {"default": [...], "feidudu": [...]}}
+ACTION_QUOTES = {
+    "walk": {
+        "default": [
+            "出去溜达一圈～",
+            "迈开小短腿，散步去",
+            "溜达溜达～",
+        ],
+        "feidudu": [
+            "肥嘟嘟去巡逻了～",
+            "肚子胖胖，脚步稳当",
+            "溜达溜达，消化消化",
+        ],
+    },
+    "jump": {
+        "default": [
+            "跳一个！",
+            "蹦跶两下",
+            "飞起来啦！",
+        ],
+        "feidudu": [
+            "胆子肥，跳得高！",
+            "蹦跶蹦跶，肉肉晃悠",
+            "跳起来给你看～",
+        ],
+    },
+    "sleep": {
+        "default": [
+            "困了，眯一会儿～",
+            "眼皮打架了",
+            "先睡为敬",
+            "呼噜…",
+        ],
+        "feidudu": [
+            "胆子鼓鼓，先睡为敬～",
+            "吃饱了，歇会儿",
+            "呼噜呼噜…",
+        ],
+    },
+    "wander": {
+        "default": [
+            "去那边看看",
+            "我巡逻一下",
+        ],
+        "feidudu": [
+            "肥嘟嘟巡逻时间到",
+            "转转肚皮，找点乐子",
+        ],
+    },
+    "idle": {
+        "default": [
+            "待机中…",
+        ],
+        "feidudu": [
+            "肥嘟嘟在此待命",
+        ],
+    },
+    "chat": {
+        "default": RANDOM_MESSAGES,
+        "feidudu": RANDOM_MESSAGES + FEIDUDU_MESSAGES,
+    },
+    # 喝水/喝水提醒（drink 状态或喝水提醒时弹）
+    "drink": {
+        "default": [
+            "喝口水润润嗓",
+            "干杯～",
+            "咕嘟咕嘟…",
+        ],
+        "feidudu": [
+            "肚皮嘟嘟，喝水补补",
+            "肥嘟嘟干杯！",
+            "咕嘟咕嘟，肚皮圆了",
+        ],
+    },
+}
+
+
+def get_action_quotes(state: str) -> list[str]:
+    """按当前皮肤返回指定状态的切换台词。空列表表示不弹台词。"""
+    table = ACTION_QUOTES.get(state, {})
+    skin = current_skin()
+    if skin == "feidudu" and "feidudu" in table:
+        return table["feidudu"]
+    return table.get("default", [])
+
+
+# 动作台词冷却时间（秒）：同一状态切换在该时间内不重复弹台词，避免刷屏
+ACTION_QUOTE_COOLDOWN = 8
+
+
 def get_happy_messages():
     return HAPPY_MESSAGES
 

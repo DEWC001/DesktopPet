@@ -3,6 +3,7 @@ import datetime
 import math
 import os
 import random
+import time
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -16,6 +17,8 @@ from .im_unread_watcher import ImUnreadWatcher
 from .speech_bubble import SpeechBubble
 
 FRAME_NAMES = ["idle", "blink", "walk_a", "walk_b", "jump", "sleep"]
+# 扩展动作帧（皮肤目录里存在则加载，不存在则回退 idle）
+EXTRA_FRAME_NAMES = ["drink", "think", "laugh"]
 
 # 呼吸缩放预生成级别（加密到 21 级，缩放过渡平滑）
 BREATH_SCALES = [round(0.96 + 0.004 * i, 4) for i in range(21)]
@@ -50,6 +53,11 @@ class PetWindow(QWidget):
         for name in FRAME_NAMES:
             if self.frames[name] is None:
                 self.frames[name] = idle
+        # 加载扩展动作帧（存在则用，不存在时跳过，_current_frame_name 会回退 idle）
+        for name in EXTRA_FRAME_NAMES:
+            pix = self._load(f"{name}.png")
+            if not pix.isNull():
+                self.frames[name] = self._fit(pix)
         self._rebuild_breath_cache()
 
         self._margin = 8
@@ -68,6 +76,11 @@ class PetWindow(QWidget):
         self._press_global = QPoint()
         self._win_origin = QPoint()
         self._remind_anim = None
+        # 临时帧覆盖（笑/喝水等短暂动作）：_override_frame 为帧名，_override_until 为过期时间戳
+        self._override_frame = None
+        self._override_until = 0
+        # 动作台词冷却：{state: last_emit_time}，避免切换刷屏
+        self._last_action_quote_at: dict[str, float] = {}
         self.bubble = None
         self.tray = None
 
@@ -244,12 +257,18 @@ class PetWindow(QWidget):
             ]
 
     def _current_frame_name(self) -> str:
+        # 1. 临时帧覆盖（如双击 laugh、喝水 drink），过期自动失效
+        if self._override_frame and self._override_frame in self.frames:
+            return self._override_frame
+        # 2. 状态映射
         if self._jumping or self.brain.state == PetBrain.JUMP:
             return "jump"
         if self.brain.state == PetBrain.SLEEP:
             return "sleep"
         if self.brain.state in (PetBrain.WALK, PetBrain.WANDER):
             return self._walk_frame
+        if self.brain.state == PetBrain.CHAT and "think" in self.frames:
+            return "think"  # 自语时用 think 帧（摸头/害羞感）
         if self._blinking:
             return "blink"
         return "idle"
@@ -266,6 +285,10 @@ class PetWindow(QWidget):
 
     # ---------- 动画 ----------
     def _on_breath(self) -> None:
+        # 临时帧覆盖过期清除
+        if self._override_until and time.time() * 1000 > self._override_until:
+            self._override_frame = None
+            self._override_until = 0
         self._phase += 0.1
         if self.brain.state == PetBrain.SLEEP:
             amp, sf = 1.0, 0.01
@@ -324,6 +347,22 @@ class PetWindow(QWidget):
             self._wander()
 
         self._blinking = s == PetBrain.SLEEP
+        # 切换动作时按冷却弹台词气泡
+        self._emit_action_quote(s)
+
+    def _emit_action_quote(self, state: str) -> None:
+        """状态切换时按冷却弹动作台词（避免频繁刷屏）。"""
+        msgs = config.get_action_quotes(state)
+        if not msgs:
+            return
+        now = time.time()
+        last = self._last_action_quote_at.get(state, 0)
+        if now - last < config.ACTION_QUOTE_COOLDOWN:
+            return
+        self._last_action_quote_at[state] = now
+        if self.bubble is not None and self.bubble.isVisible():
+            return  # 气泡正显示，不覆盖
+        self._show_bubble(random.choice(msgs), 4000)
 
     def _do_jump(self, dx=None) -> None:
         if dx is None:
@@ -410,6 +449,10 @@ class PetWindow(QWidget):
             self._say(config.get_click_messages())
 
     def _do_double_click(self) -> None:
+        # 双击：连跳 + 临时 laugh 帧（1.5 秒后恢复）
+        if "laugh" in self.frames:
+            self._override_frame = "laugh"
+            self._override_until = time.time() * 1000 + 1500
         for i in range(3):
             QTimer.singleShot(i * 280, self._do_jump)
         self._say(config.get_happy_messages())
@@ -459,6 +502,12 @@ class PetWindow(QWidget):
         msg = random.choice(config.get_drink_messages())
         self._play_drink_sound()
         was = self._begin_reminder()
+        # 喝水提醒期间用 drink 帧（10 秒过期，配合气泡持续时间）
+        if "drink" in self.frames:
+            self._override_frame = "drink"
+            self._override_until = time.time() * 1000 + 10000
+        # 喝水专属动作台词（用新 ACTION_QUOTES 系统）
+        self._emit_action_quote("drink")
         if config.get("drink_location") == "center":
             origin = self.pos()
             self._move_to_center()
