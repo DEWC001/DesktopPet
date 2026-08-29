@@ -31,12 +31,50 @@ def settings() -> QSettings:
     return QSettings(ORG_NAME, APP_NAME)
 
 
+# 默认皮肤：'default' 表示使用 skins/ 根目录下的旧版（兼容）；其他为 skins/<子目录名>/
+DEFAULT_SKIN = "default"
+
+# 换肤支持的必需帧
+SKIN_FRAMES = ("idle", "blink", "walk_a", "walk_b", "jump", "sleep")
+
+
+def list_skins() -> list[str]:
+    """扫描可用皮肤：返回 ['default', 'yellow_pet', ...] 列表。
+    'default' 总是存在（指向 skins/ 根目录的旧版帧）；其他为 skins/ 下含全部必需帧的子目录。
+    """
+    base = resource_path("skins")
+    found = ["default"]
+    if not os.path.isdir(base):
+        return found
+    for name in sorted(os.listdir(base)):
+        full = os.path.join(base, name)
+        if not os.path.isdir(full):
+            continue
+        # 跳过下划线开头的开发目录（如 _dev, _raw）
+        if name.startswith(("_", ".")):
+            continue
+        # 必须包含全部 6 个帧
+        if all(os.path.isfile(os.path.join(full, f"{f}.png")) for f in SKIN_FRAMES):
+            found.append(name)
+    return found
+
+
+def current_skin() -> str:
+    """读取当前皮肤名（非法值回退 default）。"""
+    val = settings().value("skin", DEFAULT_SKIN)
+    if val in list_skins():
+        return val
+    return DEFAULT_SKIN
+
+
 DEFAULTS = {
     "always_on_top": True,
     "auto_start": False,
     "scale": 0.65,  # 宠物缩放系数（1.0 = 260px 原始高度）
     "pos_x": -1,   # -1 表示未记录，默认吸附右下角
     "pos_y": -1,
+    # 当前皮肤
+    "skin": DEFAULT_SKIN,
     # 喝水提醒
     "drink_enabled": False,
     "drink_interval": 60,       # 分钟
@@ -104,6 +142,7 @@ RANDOM_MESSAGES = [
     "要不要起来走两步？",
     "嘿，我在呢！",
     "摸摸我会变好运哦～",
+    "你的胆子真是肥嘟嘟的～",
 ]
 
 
@@ -118,6 +157,7 @@ CLICK_MESSAGES = [
     "找我干嘛呀？",
     "在的在的！",
     "抱抱！",
+    "你的胆子真是肥嘟嘟的～",
     "给你比个心～",
     "别闹，我在认真站岗呢",
     "摸我头会变好运哦",

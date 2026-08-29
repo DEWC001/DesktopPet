@@ -8,7 +8,7 @@ from . import config
 
 class TrayIcon(QSystemTrayIcon):
     def __init__(self, window, parent=None):
-        icon = QIcon(QPixmap(config.resource_path("skins", "idle.png")))
+        icon = self._build_idle_icon()
         super().__init__(icon, parent)
         self.window = window
 
@@ -85,6 +85,22 @@ class TrayIcon(QSystemTrayIcon):
         act_custom_size = QAction("自定义...", self.size_menu)
         act_custom_size.triggered.connect(self._on_custom_scale)
         self.size_menu.addAction(act_custom_size)
+
+        # 更换皮肤子菜单（动态扫描可用皮肤）
+        self.skin_menu = QMenu("更换皮肤", self.menu)
+        self._skin_acts = {}
+        self._skin_group = QActionGroup(self)
+        self._skin_group.setExclusive(True)
+        for skin_name in config.list_skins():
+            # 显示名：default 翻译为「默认（企鹅）」，其他用原名
+            display = "默认（企鹅）" if skin_name == "default" else skin_name
+            act = QAction(display, self.skin_menu)
+            act.setCheckable(True)
+            act.setData(skin_name)
+            act.triggered.connect(lambda checked, n=skin_name: self._on_skin(n))
+            self._skin_acts[skin_name] = act
+            self._skin_group.addAction(act)
+            self.skin_menu.addAction(act)
 
         # 整点报时
         self.act_hourly = QAction("整点报时", self.menu)
@@ -180,6 +196,7 @@ class TrayIcon(QSystemTrayIcon):
         self.menu.addMenu(self.im_menu)
         self.menu.addSeparator()
         self.menu.addMenu(self.size_menu)
+        self.menu.addMenu(self.skin_menu)
         self.menu.addSeparator()
         self.menu.addAction(self.act_quit)
         self.setContextMenu(self.menu)
@@ -190,6 +207,21 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_sit_interval_checks()
         self._sync_offwork_checks()
         self._sync_delay_checks()
+        self._sync_skin_checks()
+
+    # ---------- 图标 ----------
+    def _build_idle_icon(self) -> QIcon:
+        """按当前皮肤构造托盘图标。"""
+        skin = config.current_skin()
+        if skin == "default":
+            path = config.resource_path("skins", "idle.png")
+        else:
+            path = config.resource_path("skins", skin, "idle.png")
+        return QIcon(QPixmap(path))
+
+    def refresh_icon(self) -> None:
+        """皮肤切换后更新托盘图标。"""
+        self.setIcon(self._build_idle_icon())
 
     # ---------- 回调 ----------
     def _on_toggle_top(self, checked: bool) -> None:
@@ -270,6 +302,7 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_sit_interval_checks()
         self._sync_offwork_checks()
         self._sync_delay_checks()
+        self._sync_skin_checks()
 
     def _on_location(self, loc: str) -> None:
         config.set_value("drink_location", loc)
@@ -345,6 +378,19 @@ class TrayIcon(QSystemTrayIcon):
             config.set_value("offwork_time", text)
             self._sync_offwork_checks(text)
             self.window.refresh_reminders()
+
+    # ---------- 换肤 ----------
+    def _sync_skin_checks(self, skin_name: str = None) -> None:
+        if skin_name is None:
+            skin_name = config.current_skin()
+        for name, act in self._skin_acts.items():
+            act.setChecked(name == skin_name)
+
+    def _on_skin(self, skin_name: str) -> None:
+        if skin_name == config.current_skin():
+            return
+        self.window.set_skin(skin_name)
+        self._sync_skin_checks(skin_name)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

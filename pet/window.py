@@ -155,10 +155,46 @@ class PetWindow(QWidget):
 
     # ---------- 素材 ----------
     def _load(self, name: str) -> QPixmap:
-        path = config.resource_path("skins", name)
+        skin = config.current_skin()
+        if skin == "default":
+            path = config.resource_path("skins", name)
+        else:
+            path = config.resource_path("skins", skin, name)
         if os.path.exists(path):
             return QPixmap(path)
         return QPixmap()
+
+    def set_skin(self, name: str) -> None:
+        """切换皮肤：保存配置、重新加载所有帧、重建呼吸缓存、保持窗口中心。"""
+        if name not in config.list_skins():
+            return  # 非法皮肤名直接忽略
+        if name == config.current_skin():
+            return  # 已是当前皮肤
+        config.set_value("skin", name)
+        # 重新加载所有帧
+        self.frames: dict[str, QPixmap] = {}
+        idle = None
+        for frame_name in FRAME_NAMES:
+            pix = self._load(f"{frame_name}.png")
+            self.frames[frame_name] = self._fit(pix) if not pix.isNull() else None
+            if frame_name == "idle":
+                idle = self.frames["idle"]
+        if idle is None:
+            idle = QPixmap(120, 120)
+            idle.fill(Qt.GlobalColor.transparent)
+            self.frames["idle"] = idle
+        for frame_name in FRAME_NAMES:
+            if self.frames[frame_name] is None:
+                self.frames[frame_name] = idle
+        self._rebuild_breath_cache()
+        # 保持窗口中心调整尺寸
+        center = self.geometry().center()
+        self.setFixedSize(idle.width() + self._margin * 2, idle.height() + self._margin * 2)
+        self.label.setGeometry(self._margin, self._margin, idle.width(), idle.height())
+        self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        # 同步托盘图标为当前皮肤的 idle
+        if self.tray is not None:
+            self.tray.refresh_icon()
 
     def _fit(self, pix: QPixmap) -> QPixmap:
         if pix.isNull():
