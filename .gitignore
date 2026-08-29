@@ -18,3 +18,14 @@ raw/
 lingxi_diag.log
 lingxi_tray_diag.log
 @AutomationLog.txt
+
+# 皮肤开发产物（脚本/缩略图/原图备份/中间抠图）
+**/_thumb/
+**/_thumb2/
+**/yuantu/
+**/kotu/
+**/_process*.py
+**/_test_*.py
+**/_clear_text.py
+**/_rewalk.py
+**/extra/
