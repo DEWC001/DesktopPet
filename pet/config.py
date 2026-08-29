@@ -142,11 +142,24 @@ RANDOM_MESSAGES = [
     "要不要起来走两步？",
     "嘿，我在呢！",
     "摸摸我会变好运哦～",
+]
+
+# feidudu（肥嘟嘟）皮肤专属台词（与全局台词混合使用，凸显个性）
+FEIDUDU_MESSAGES = [
     "你的胆子真是肥嘟嘟的～",
+    "我的胆子，肥嘟嘟的！",
+    "别看我软，胆子很肥～",
+    "肚子嘟嘟，胆子鼓鼓",
+    "肥嘟嘟的胆子，在此！",
+    "胆子肥嘟嘟，干啥都不怵",
+    "摸我一下，胆子也会变肥哦",
 ]
 
 
 def get_random_messages():
+    """按当前皮肤返回随机台词：feidudu 皮肤追加专属台词。"""
+    if current_skin() == "feidudu":
+        return RANDOM_MESSAGES + FEIDUDU_MESSAGES
     return RANDOM_MESSAGES
 
 
@@ -157,7 +170,6 @@ CLICK_MESSAGES = [
     "找我干嘛呀？",
     "在的在的！",
     "抱抱！",
-    "你的胆子真是肥嘟嘟的～",
     "给你比个心～",
     "别闹，我在认真站岗呢",
     "摸我头会变好运哦",
@@ -165,6 +177,16 @@ CLICK_MESSAGES = [
     "叮！收到你的互动～",
     "嘿嘿，就知道你会点我",
     "乖，摸摸头～",
+]
+
+# feidudu 皮肤专属点击回应
+FEIDUDU_CLICK_MESSAGES = [
+    "你的胆子真是肥嘟嘟的～",
+    "轻点戳，我的胆子会漏气",
+    "肥嘟嘟本嘟在此",
+    "别闹，我在认真地肥着",
+    "戳我？胆子不小嘛",
+    "嘿嘿，肥嘟嘟的肚子禁摸",
 ]
 
 
@@ -182,6 +204,9 @@ HAPPY_MESSAGES = [
 
 
 def get_click_messages():
+    """按当前皮肤返回点击回应：feidudu 皮肤追加专属回应。"""
+    if current_skin() == "feidudu":
+        return CLICK_MESSAGES + FEIDUDU_CLICK_MESSAGES
     return CLICK_MESSAGES
 
 
