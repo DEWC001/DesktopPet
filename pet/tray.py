@@ -1,9 +1,16 @@
 """系统托盘 + 右键菜单。"""
+import datetime
+
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QSystemTrayIcon
 
 from . import autostart
 from . import config
+from .custom_reminder_dialog import (
+    ReminderEditDialog,
+    ReminderManageDialog,
+    describe,
+)
 
 
 class TrayIcon(QSystemTrayIcon):
@@ -28,6 +35,18 @@ class TrayIcon(QSystemTrayIcon):
         self.act_auto.setCheckable(True)
         self.act_auto.setChecked(autostart.is_auto_start())
         self.act_auto.toggled.connect(self._on_auto_start)
+
+        # 提示音总开关（关闭后提醒只弹气泡不响铃）
+        self.act_sound = QAction("提示音", self.menu)
+        self.act_sound.setCheckable(True)
+        self.act_sound.setChecked(config.sound_enabled())
+        self.act_sound.toggled.connect(self._on_sound)
+
+        # 贴边隐藏（静止 N 秒自动滑到边缘只露一角，鼠标靠近再滑回）
+        self.act_edge_hide = QAction("贴边隐藏", self.menu)
+        self.act_edge_hide.setCheckable(True)
+        self.act_edge_hide.setChecked(config.flag("edge_hide_enabled"))
+        self.act_edge_hide.toggled.connect(self._on_edge_hide)
 
         # 喝水提醒子菜单
         self.drink_menu = QMenu("喝水提醒", self.menu)
@@ -142,6 +161,17 @@ class TrayIcon(QSystemTrayIcon):
         self.im_menu.addSeparator()
         self.im_menu.addMenu(self.delay_menu)
 
+        # 自定义提醒子菜单（用户自加事项：吃药 / 周会 / 一次性提醒）
+        self.custom_menu = QMenu("自定义提醒", self.menu)
+        act_add_custom = QAction("添加提醒...", self.custom_menu)
+        act_add_custom.triggered.connect(self._on_add_custom)
+        act_manage_custom = QAction("管理 / 删除...", self.custom_menu)
+        act_manage_custom.triggered.connect(self._on_manage_custom)
+        self.custom_menu.addAction(act_add_custom)
+        self.custom_menu.addAction(act_manage_custom)
+        self.custom_menu.addSeparator()
+        self._custom_acts = {}
+
         # 久坐提醒子菜单
         self.sit_menu = QMenu("久坐提醒", self.menu)
         self.act_sit_enabled = QAction("开启提醒", self.sit_menu)
@@ -182,18 +212,58 @@ class TrayIcon(QSystemTrayIcon):
         self.offwork_menu.addSeparator()
         self.offwork_menu.addMenu(self.offwork_time_menu)
 
+        # 专注模式子菜单（一段时间内静默所有提醒，菜单标题显示剩余时间）
+        self.focus_menu = QMenu("专注模式", self.menu)
+        for mins in config.FOCUS_PRESETS:
+            act = QAction(f"专注 {mins} 分钟", self.focus_menu)
+            act.triggered.connect(lambda checked, m=mins: self._on_focus(m))
+            self.focus_menu.addAction(act)
+        self.focus_menu.addSeparator()
+        act_focus_off = QAction("结束专注", self.focus_menu)
+        act_focus_off.triggered.connect(lambda: self._on_focus(0))
+        self.focus_menu.addAction(act_focus_off)
+
+        # 免打扰时段子菜单（每天固定时段静默，支持跨零点）
+        self.quiet_menu = QMenu("免打扰时段", self.menu)
+        self.act_quiet_enabled = QAction("开启免打扰", self.quiet_menu)
+        self.act_quiet_enabled.setCheckable(True)
+        self.act_quiet_enabled.setChecked(config.quiet_enabled())
+        self.act_quiet_enabled.toggled.connect(self._on_quiet_enabled)
+        self.quiet_menu.addAction(self.act_quiet_enabled)
+        self.quiet_menu.addSeparator()
+        self._quiet_acts = {}
+        for label, s, e in config.QUIET_PRESETS:
+            act = QAction(label, self.quiet_menu)
+            act.setCheckable(True)
+            act.triggered.connect(lambda checked, a=s, b=e: self._on_quiet_preset(a, b))
+            self._quiet_acts[(s, e)] = act
+            self.quiet_menu.addAction(act)
+        self.quiet_menu.addSeparator()
+        act_qs = QAction("自定义开始时间...", self.quiet_menu)
+        act_qs.triggered.connect(self._on_quiet_start)
+        act_qe = QAction("自定义结束时间...", self.quiet_menu)
+        act_qe.triggered.connect(self._on_quiet_end)
+        self.quiet_menu.addAction(act_qs)
+        self.quiet_menu.addAction(act_qe)
+
         self.act_quit = QAction("退出", self.menu)
         self.act_quit.triggered.connect(self._on_quit)
 
         self.menu.addAction(self.act_top)
         self.menu.addAction(self.act_hide)
         self.menu.addAction(self.act_auto)
+        self.menu.addAction(self.act_sound)
+        self.menu.addAction(self.act_edge_hide)
         self.menu.addSeparator()
         self.menu.addMenu(self.drink_menu)
         self.menu.addMenu(self.sit_menu)
         self.menu.addMenu(self.offwork_menu)
         self.menu.addAction(self.act_hourly)
         self.menu.addMenu(self.im_menu)
+        self.menu.addMenu(self.custom_menu)
+        self.menu.addSeparator()
+        self.menu.addMenu(self.focus_menu)
+        self.menu.addMenu(self.quiet_menu)
         self.menu.addSeparator()
         self.menu.addMenu(self.size_menu)
         self.menu.addMenu(self.skin_menu)
@@ -208,6 +278,9 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_offwork_checks()
         self._sync_delay_checks()
         self._sync_skin_checks()
+        self._sync_quiet_checks()
+        self._sync_focus_menu()
+        self._sync_custom_menu()
 
     # ---------- 图标 ----------
     def _build_idle_icon(self) -> QIcon:
@@ -244,7 +317,7 @@ class TrayIcon(QSystemTrayIcon):
 
     def _on_drink_enabled(self, checked: bool) -> None:
         config.set_value("drink_enabled", checked)
-        self.window.update_drink_settings()
+        self.window.refresh_reminder("drink")
 
     def _sync_interval_checks(self, mins=None) -> None:
         if mins is None:
@@ -255,7 +328,7 @@ class TrayIcon(QSystemTrayIcon):
     def _on_interval(self, mins: int) -> None:
         config.set_value("drink_interval", mins)
         self._sync_interval_checks(mins)
-        self.window.update_drink_settings()
+        self.window.refresh_reminder("drink")
 
     def _on_custom_interval(self) -> None:
         current = int(config.get("drink_interval"))
@@ -265,7 +338,7 @@ class TrayIcon(QSystemTrayIcon):
         if ok:
             config.set_value("drink_interval", val)
             self._sync_interval_checks(val)
-            self.window.update_drink_settings()
+            self.window.refresh_reminder("drink")
 
     def _sync_size_checks(self, scale=None) -> None:
         if scale is None:
@@ -297,20 +370,25 @@ class TrayIcon(QSystemTrayIcon):
         self.act_im_master.setChecked(bool(config.get("feishu_enabled")))
         for app_name, act in self._im_app_acts.items():
             act.setChecked(bool(config.get_im_enabled(app_name)))
+        self.act_sound.setChecked(config.sound_enabled())
+        self.act_edge_hide.setChecked(config.flag("edge_hide_enabled"))
         self._sync_interval_checks()
         self._sync_size_checks()
         self._sync_sit_interval_checks()
         self._sync_offwork_checks()
         self._sync_delay_checks()
         self._sync_skin_checks()
+        self._sync_quiet_checks()
+        self._sync_focus_menu()
+        self._sync_custom_menu()
 
     def _on_location(self, loc: str) -> None:
         config.set_value("drink_location", loc)
-        self.window.update_drink_settings()
+        self.window.refresh_reminder("drink")
 
     def _on_hourly(self, checked: bool) -> None:
         config.set_value("hourly_enabled", checked)
-        self.window.refresh_reminders()
+        self.window.refresh_reminder("hourly")
 
     def _on_im_master(self, checked: bool) -> None:
         config.set_value("feishu_enabled", checked)
@@ -347,12 +425,12 @@ class TrayIcon(QSystemTrayIcon):
 
     def _on_sit_enabled(self, checked: bool) -> None:
         config.set_value("sit_enabled", checked)
-        self.window.refresh_reminders()
+        self.window.refresh_reminder("sit")
 
     def _on_sit_interval(self, mins: int) -> None:
         config.set_value("sit_interval", mins)
         self._sync_sit_interval_checks(mins)
-        self.window.refresh_reminders()
+        self.window.refresh_reminder("sit")
 
     def _sync_offwork_checks(self, t=None) -> None:
         if t is None:
@@ -362,12 +440,12 @@ class TrayIcon(QSystemTrayIcon):
 
     def _on_offwork_enabled(self, checked: bool) -> None:
         config.set_value("offwork_enabled", checked)
-        self.window.refresh_reminders()
+        self.window.refresh_reminder("offwork")
 
     def _on_offwork_time(self, t: str) -> None:
         config.set_value("offwork_time", t)
         self._sync_offwork_checks(t)
-        self.window.refresh_reminders()
+        self.window.refresh_reminder("offwork")
 
     def _on_custom_offwork_time(self) -> None:
         current = config.get("offwork_time")
@@ -377,7 +455,7 @@ class TrayIcon(QSystemTrayIcon):
         if ok and text:
             config.set_value("offwork_time", text)
             self._sync_offwork_checks(text)
-            self.window.refresh_reminders()
+            self.window.refresh_reminder("offwork")
 
     # ---------- 换肤 ----------
     def _sync_skin_checks(self, skin_name: str = None) -> None:
@@ -391,6 +469,108 @@ class TrayIcon(QSystemTrayIcon):
             return
         self.window.set_skin(skin_name)
         self._sync_skin_checks(skin_name)
+
+    # ---------- 提示音 / 免打扰 / 专注模式 ----------
+    def _on_sound(self, checked: bool) -> None:
+        config.set_value("sound_enabled", checked)
+
+    def _on_edge_hide(self, checked: bool) -> None:
+        config.set_value("edge_hide_enabled", checked)
+        if checked:
+            self.window._setup_edge_hide_timer()
+        else:
+            self.window._disable_edge_hide()
+
+    def _on_focus(self, mins: int) -> None:
+        """开启专注模式若干分钟；0 表示立即结束专注。"""
+        config.set_focus_minutes(mins)
+        self._sync_focus_menu()
+
+    def _on_quiet_enabled(self, checked: bool) -> None:
+        config.set_value("quiet_enabled", checked)
+        self._sync_quiet_checks()
+
+    def _on_quiet_preset(self, start: str, end: str) -> None:
+        config.set_value("quiet_start", start)
+        config.set_value("quiet_end", end)
+        config.set_value("quiet_enabled", True)
+        self._sync_quiet_checks()
+
+    def _on_quiet_start(self) -> None:
+        text, ok = QInputDialog.getText(
+            None, "免打扰开始时间", "开始时间（HH:MM，如 22:30）", text=config.quiet_start()
+        )
+        if ok and self._valid_hm(text):
+            config.set_value("quiet_start", str(text).strip())
+            self._sync_quiet_checks()
+
+    def _on_quiet_end(self) -> None:
+        text, ok = QInputDialog.getText(
+            None, "免打扰结束时间", "结束时间（HH:MM，如 08:00）", text=config.quiet_end()
+        )
+        if ok and self._valid_hm(text):
+            config.set_value("quiet_end", str(text).strip())
+            self._sync_quiet_checks()
+
+    @staticmethod
+    def _valid_hm(text: str) -> bool:
+        try:
+            datetime.datetime.strptime(str(text).strip(), "%H:%M")
+            return True
+        except Exception:
+            return False
+
+    def _sync_quiet_checks(self) -> None:
+        self.act_quiet_enabled.setChecked(config.quiet_enabled())
+        start, end = config.quiet_start(), config.quiet_end()
+        for (s, e), act in self._quiet_acts.items():
+            act.setChecked(s == start and e == end)
+
+    def _sync_focus_menu(self) -> None:
+        """菜单标题显示专注剩余时间，用户不点进去也能看到状态。"""
+        left = config.focus_remaining()
+        if left <= 0:
+            self.focus_menu.setTitle("专注模式")
+            return
+        mins = max(1, left // 60)
+        if mins >= 60:
+            self.focus_menu.setTitle(f"专注中 · 剩 {mins // 60} 小时 {mins % 60} 分")
+        else:
+            self.focus_menu.setTitle(f"专注中 · 剩 {mins} 分钟")
+
+    # ---------- 自定义提醒 ----------
+    def _on_add_custom(self) -> None:
+        dlg = ReminderEditDialog()
+        if not dlg.exec():
+            return
+        item = dlg.result_item()
+        if not item or not item.get("label"):
+            return
+        config.add_custom_reminder(item)
+        self._sync_custom_menu()
+        self.window.refresh_reminder("custom")
+
+    def _on_manage_custom(self) -> None:
+        ReminderManageDialog().exec()
+        self._sync_custom_menu()
+        self.window.refresh_reminder("custom")
+
+    def _on_toggle_custom(self, item: dict, checked: bool) -> None:
+        config.set_custom_reminder_enabled(item.get("id"), checked)
+        self.window.refresh_reminder("custom")
+
+    def _sync_custom_menu(self) -> None:
+        """重建自定义提醒列表项（前两个固定项保持不变）。"""
+        for act in self._custom_acts.values():
+            self.custom_menu.removeAction(act)
+        self._custom_acts.clear()
+        for item in config.get_custom_reminders():
+            act = QAction(describe(item), self.custom_menu)
+            act.setCheckable(True)
+            act.setChecked(bool(item.get("enabled", True)))
+            act.toggled.connect(lambda checked, i=item: self._on_toggle_custom(i, checked))
+            self._custom_acts[item.get("id")] = act
+            self.custom_menu.addAction(act)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

@@ -6,7 +6,7 @@ import random
 import time
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from . import config
@@ -62,6 +62,19 @@ class PetWindow(QWidget):
         # 临时帧覆盖（笑/喝水等短暂动作）：_override_frame 为帧名，_override_until 为过期时间戳
         self._override_frame = None
         self._override_until = 0
+        # 双击抑制：Qt 双击序列为 press→release→dblclick→release，
+        # 第二次 release 会再触发一次单击逻辑，需标记抑制，否则双击会多跳一次
+        self._suppress_click = False
+        # 连跳定时器池（可取消，避免连点时叠加跳动）
+        self._jump_timers: list[QTimer] = []
+        # 贴边隐藏：normal → hiding → hidden → showing → normal
+        # 静止 N 秒后滑到最近边缘只露一角，鼠标靠近再滑回 _last_user_pos
+        self._edge_state = "normal"
+        self._last_move_time = time.time()
+        self._last_user_pos = self.pos()
+        self._edge_hide_idle_timer: QTimer = None
+        self._edge_hide_check_timer: QTimer = None
+        self._edge_anim = None
         # 动作台词冷却：{state: last_emit_time}，避免切换刷屏
         self._last_action_quote_at: dict[str, float] = {}
         self.bubble = None
@@ -127,11 +140,23 @@ class PetWindow(QWidget):
         self.sit_timer.timeout.connect(self.remind_sit)
         self._setup_sit_timer()
 
+        # 自定义提醒：轮询定时器 + 当日已触发去重（跨天自动清空）
+        # 必须早于 _setup_custom_reminders() 调用
+        self.custom_timer = None
+        self._fired_custom: set = set()
+        self._fired_custom_day = ""
+
         # 下班倒计时
         self.offwork_timer = QTimer(self)
         self.offwork_timer.setSingleShot(True)
         self.offwork_timer.timeout.connect(self.remind_offwork)
         self._setup_offwork_timer()
+
+        # 自定义提醒事项（吃药 / 周会 / 一次性提醒）
+        self._setup_custom_reminders()
+
+        # 贴边隐藏（静止超时自动滑到边缘只露一角）
+        self._setup_edge_hide_timer()
 
         # 气泡统一 hide 管理（避免多个定时器互相干扰导致一闪而过）
         self._bubble_timer = QTimer(self)
@@ -312,6 +337,7 @@ class PetWindow(QWidget):
             self._walk_dir *= -1
             x = self.x() + self._walk_dir * 2
         self.move(x, self.y())
+        self._mark_movement()
 
     def _on_state(self, s: str) -> None:
         self.walk_timer.stop()
@@ -364,6 +390,7 @@ class PetWindow(QWidget):
         self._show_bubble(msg, 8000)
 
     def _wander(self) -> None:
+        self._mark_movement()
         screen = QApplication.primaryScreen().availableGeometry()
         lo = screen.left()
         hi = max(screen.left(), screen.right() - self.width())
@@ -388,6 +415,9 @@ class PetWindow(QWidget):
             self._press_global = e.globalPosition().toPoint()
             self._win_origin = self.pos()
             self._moved = False
+            if self._edge_state == "hidden":
+                # 用户点击露出的部分：直接滑回原位
+                self._begin_edge_show()
             e.accept()
 
     def mouseMoveEvent(self, e):
@@ -404,18 +434,27 @@ class PetWindow(QWidget):
             was_click = not self._moved
             self._drag = False
             self._moved = False
+            if self._suppress_click:
+                # 双击序列的第二次 release：忽略，否则会额外触发一次单击跳
+                self._suppress_click = False
+                e.accept()
+                return
             if was_click:
                 self._on_click()
             else:
                 self._save_pos()
-            e.accept()
+                self._last_user_pos = self.pos()
+                self._mark_movement()
+                e.accept()
 
     def _on_click(self) -> None:
         self.brain.poke()
         self._click_timer.start()  # 延迟判断单击/双击
+        self._mark_movement()
 
     def mouseDoubleClickEvent(self, e) -> None:
         self._click_timer.stop()
+        self._suppress_click = True  # 抑制紧随其后的第二次 release
         self._do_double_click()
         e.accept()
 
@@ -432,13 +471,29 @@ class PetWindow(QWidget):
         if random.random() < 0.5:
             self._say(config.get_click_messages())
 
+    def _cancel_pending_jumps(self) -> None:
+        """取消尚未触发的连跳定时器（连点双击时不叠加跳动）。"""
+        for t in self._jump_timers:
+            t.stop()
+        self._jump_timers.clear()
+
+    def _schedule_jump(self, delay: int) -> None:
+        """安排一次延迟跳跃，可被 _cancel_pending_jumps 取消。"""
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(self._do_jump)
+        t.start(delay)
+        self._jump_timers.append(t)
+
     def _do_double_click(self) -> None:
-        # 双击：连跳 + 临时 laugh 帧（1.5 秒后恢复）
+        # 双击：连跳 3 下 + 临时 laugh 帧（1.5 秒后恢复）
+        self._cancel_pending_jumps()
+        self._mark_movement()
         if "laugh" in self.frames:
             self._override_frame = "laugh"
             self._override_until = time.time() * 1000 + 1500
         for i in range(3):
-            QTimer.singleShot(i * 280, self._do_jump)
+            self._schedule_jump(i * 280)
         self._say(config.get_happy_messages())
 
     def _say(self, messages) -> None:
@@ -447,6 +502,109 @@ class PetWindow(QWidget):
 
     def _end_jump(self) -> None:
         self._jumping = False
+        self._mark_movement()
+
+    # ---------- 贴边隐藏 ----------
+    def _setup_edge_hide_timer(self) -> None:
+        """启动/停止贴边隐藏的空闲计时器（每秒检查一次）。"""
+        if not config.flag("edge_hide_enabled"):
+            if self._edge_hide_idle_timer is not None:
+                self._edge_hide_idle_timer.stop()
+            return
+        if self._edge_hide_idle_timer is None:
+            self._edge_hide_idle_timer = QTimer(self)
+            self._edge_hide_idle_timer.setInterval(1000)
+            self._edge_hide_idle_timer.timeout.connect(self._check_edge_hide)
+        self._edge_hide_idle_timer.start()
+
+    def _disable_edge_hide(self) -> None:
+        """用户关闭贴边隐藏时调用：停掉定时器，若处于贴边则滑回原位。"""
+        if self._edge_hide_idle_timer is not None:
+            self._edge_hide_idle_timer.stop()
+        if self._edge_hide_check_timer is not None:
+            self._edge_hide_check_timer.stop()
+        if self._edge_state in ("hidden", "hiding"):
+            self._begin_edge_show()
+        else:
+            self._edge_state = "normal"
+
+    def _mark_movement(self) -> None:
+        """任何移动（自发或用户驱动）都刷新空闲计时；hiding 中被打断则回到 normal。"""
+        self._last_move_time = time.time()
+        if self._edge_state == "hiding":
+            self._edge_state = "normal"
+
+    def _check_edge_hide(self) -> None:
+        if not config.flag("edge_hide_enabled"):
+            return
+        if self._edge_state in ("hiding", "showing"):
+            return
+        if self._edge_state == "normal":
+            if self._jumping or self._drag:
+                return
+            if time.time() - self._last_move_time > config.EDGE_HIDE_IDLE_SECONDS:
+                self._begin_edge_hide()
+        elif self._edge_state == "hidden":
+            # 鼠标在窗口几何外扩 30px 内即触发滑回
+            geom = self.geometry().adjusted(-30, -30, 30, 30)
+            if geom.contains(QCursor.pos()):
+                self._begin_edge_show()
+
+    def _begin_edge_hide(self) -> None:
+        """贴边：找最近的屏幕边缘，滑过去只露 20px。"""
+        screen = QApplication.primaryScreen().availableGeometry()
+        x, y, w, h = self.x(), self.y(), self.width(), self.height()
+        distances = {
+            "left": abs(x - screen.left()),
+            "right": abs(screen.right() - (x + w)),
+            "top": abs(y - screen.top()),
+            "bottom": abs(screen.bottom() - (y + h)),
+        }
+        nearest = min(distances, key=distances.get)
+        peek = 20
+        tx, ty = x, y
+        if nearest == "left":
+            tx = screen.left() + peek - w
+        elif nearest == "right":
+            tx = screen.right() - peek
+        elif nearest == "top":
+            ty = screen.top() + peek - h
+        else:
+            ty = screen.bottom() - peek
+        self._edge_state = "hiding"
+        self._anim_to(tx, ty, 600, on_finish=self._on_hide_arrived)
+
+    def _on_hide_arrived(self) -> None:
+        """贴边动画完成：启动鼠标位置轮询，等待用户靠近。"""
+        self._edge_state = "hidden"
+        if self._edge_hide_check_timer is None:
+            self._edge_hide_check_timer = QTimer(self)
+            self._edge_hide_check_timer.setInterval(200)
+            self._edge_hide_check_timer.timeout.connect(self._check_edge_hide)
+        self._edge_hide_check_timer.start()
+
+    def _begin_edge_show(self) -> None:
+        """滑回用户最近显式拖到的位置。"""
+        if self._edge_hide_check_timer is not None:
+            self._edge_hide_check_timer.stop()
+        self._edge_state = "showing"
+        self._anim_to(
+            self._last_user_pos.x(),
+            self._last_user_pos.y(),
+            500,
+            on_finish=lambda: setattr(self, "_edge_state", "normal"),
+        )
+
+    def _anim_to(self, tx: int, ty: int, duration: int, on_finish=None) -> None:
+        anim = QPropertyAnimation(self, b"pos", self)
+        anim.setDuration(duration)
+        anim.setStartValue(self.pos())
+        anim.setEndValue(QPoint(tx, ty))
+        anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        if on_finish is not None:
+            anim.finished.connect(on_finish)
+        anim.start()
+        self._edge_anim = anim
 
     # ---------- 位置 ----------
     def _restore_pos(self) -> None:
@@ -477,14 +635,10 @@ class PetWindow(QWidget):
         else:
             self.drink_timer.stop()
 
-    def update_drink_settings(self) -> None:
-        """配置变更后（由托盘调用）重启提醒计时。"""
-        self._setup_drink_timer()
-
     def remind_drink(self) -> None:
         """到点提醒：随机提示词 + 音效 + 跳跃 + 气泡，按位置模式决定是否跑到屏幕中心。"""
         msg = random.choice(config.get_drink_messages())
-        self._play_drink_sound()
+        self._play_sound("drink.wav")
         was = self._begin_reminder()
         # 喝水提醒期间用 drink 帧（10 秒过期，配合气泡持续时间）
         if "drink" in self.frames:
@@ -492,7 +646,7 @@ class PetWindow(QWidget):
             self._override_until = time.time() * 1000 + 10000
         # 喝水专属动作台词（用新 ACTION_QUOTES 系统）
         self._emit_action_quote("drink")
-        if config.get("drink_location") == "center":
+        if config.get("drink_location") == "center" and not config.is_silent_now():
             origin = self.pos()
             self._move_to_center()
             self._remind_anim.finished.connect(lambda: self._do_jump_and_bubble(msg))
@@ -505,16 +659,21 @@ class PetWindow(QWidget):
         self._setup_drink_timer()
 
     def _do_jump_and_bubble(self, msg: str) -> None:
-        self._jumping = True
-        jump_animation(self).start()
-        QTimer.singleShot(400, self._end_jump)
+        """跳跃 + 长时间气泡；静默（免打扰/专注）时只弹气泡不跳。"""
+        if not config.is_silent_now():
+            self._jumping = True
+            jump_animation(self).start()
+            QTimer.singleShot(400, self._end_jump)
         self._show_bubble(msg, 12000)
 
-    def _play_drink_sound(self) -> None:
+    def _play_sound(self, name: str) -> None:
+        """播放提示音；关闭提示音或处于静默（免打扰/专注）时不播放。"""
+        if not config.sound_allowed():
+            return
         try:
             import winsound
 
-            path = config.resource_path("sounds", "drink.wav")
+            path = config.resource_path("sounds", name)
             if os.path.exists(path):
                 winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         except Exception:
@@ -554,11 +713,16 @@ class PetWindow(QWidget):
         self._bubble_timer.start(duration)
 
     def _notify(self, msg: str, duration: int = 10000) -> None:
-        """通用原地提醒：跳一下 + 气泡。"""
-        self._jumping = True
-        jump_animation(self).start()
-        QTimer.singleShot(400, self._end_jump)
+        """通用原地提醒：跳一下 + 气泡。静默（免打扰/专注）时只弹气泡。"""
+        if not config.is_silent_now():
+            self._jumping = True
+            jump_animation(self).start()
+            QTimer.singleShot(400, self._end_jump)
         self._show_bubble(msg, duration)
+
+    def _in_silence(self) -> bool:
+        """当前是否静默（免打扰时段或专注模式）。"""
+        return config.is_silent_now()
 
     def _begin_reminder(self) -> bool:
         """提醒开始：若在睡觉则唤醒，返回原本是否在睡。"""
@@ -626,34 +790,86 @@ class PetWindow(QWidget):
         self._end_reminder(was, delay=14000)
         self._setup_offwork_timer()
 
+    # ---------- 自定义提醒事项 ----------
+    def _setup_custom_reminders(self) -> None:
+        """启动自定义提醒轮询；没有事项时停掉定时器省资源。"""
+        if self.custom_timer is None:
+            self.custom_timer = QTimer(self)
+            self.custom_timer.setInterval(30000)
+            self.custom_timer.timeout.connect(self._check_custom_reminders)
+        if config.get_custom_reminders():
+            self.custom_timer.start()
+        else:
+            self.custom_timer.stop()
+
+    def _check_custom_reminders(self) -> None:
+        """检查是否有事项到点。30 秒轮询保证不会漏掉整分钟，靠去重保证只触发一次。"""
+        now = datetime.datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if self._fired_custom_day != today:
+            self._fired_custom.clear()
+            self._fired_custom_day = today
+        hm = now.strftime("%H:%M")
+        for item in config.get_custom_reminders():
+            if not item.get("enabled", True):
+                continue
+            if item.get("time") != hm:
+                continue
+            kind = item.get("kind", "daily")
+            if kind == "weekly" and int(item.get("weekday", 0)) != now.weekday():
+                continue
+            if kind == "once" and item.get("date") != today:
+                continue
+            fid = f"{today}:{item.get('id')}"
+            if fid in self._fired_custom:
+                continue
+            self._fired_custom.add(fid)
+            self._on_custom_reminder(item)
+
+    def _on_custom_reminder(self, item: dict) -> None:
+        """自定义事项到点提醒（静默时自动不响铃不跳跃，只留气泡）。"""
+        was = self._begin_reminder()
+        self._play_sound("msg.wav")
+        self._notify(str(item.get("label") or "时间到啦"), duration=12000)
+        self._end_reminder(was, delay=14000)
+
+    def refresh_reminder(self, kind: str) -> None:
+        """只刷新指定提醒的计时，不影响其他提醒的倒计时。
+
+        kind: drink / hourly / sit / offwork / custom
+        早期版本改一个设置会把 4 个计时器全部重启（喝水倒计时被清零），
+        这里按类型精确刷新，改久坐间隔不影响喝水计时。
+        """
+        if kind == "drink":
+            self._setup_drink_timer()
+        elif kind == "hourly":
+            self._setup_hourly_timer()
+        elif kind == "sit":
+            self._setup_sit_timer()
+        elif kind == "offwork":
+            self._setup_offwork_timer()
+        elif kind == "custom":
+            self._setup_custom_reminders()
+
     def refresh_reminders(self) -> None:
         """配置变更后（托盘调用）刷新所有提醒计时。"""
         self._setup_drink_timer()
         self._setup_hourly_timer()
         self._setup_sit_timer()
         self._setup_offwork_timer()
+        self._setup_custom_reminders()
 
     # ---------- 飞书新消息提醒 ----------
     def _on_feishu_message(self, sender: str, content: str) -> None:
         """收到飞书新消息：唤醒 + 跳一下 + 气泡显示摘要 + 提示音。"""
         was = self._begin_reminder()
-        self._play_feishu_sound()
+        self._play_sound("msg.wav")
         if sender == "飞书":
             msg = f"【飞书】{content}"
         else:
             msg = f"【飞书】{sender}：{content}"
         self._notify(msg, duration=8000)
         self._end_reminder(was, delay=9000)
-
-    def _play_feishu_sound(self) -> None:
-        try:
-            import winsound
-
-            path = config.resource_path("sounds", "msg.wav")
-            if os.path.exists(path):
-                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception:
-            pass
 
     def _on_im_unread_changed(self, app: str, unread: bool) -> None:
         """IM 未读状态翻转：有未读 → 常规提醒 + 启动超时强提醒；已读 → 取消强提醒。
@@ -662,7 +878,7 @@ class PetWindow(QWidget):
         """
         if unread:
             was = self._begin_reminder()
-            self._play_feishu_sound()
+            self._play_sound("msg.wav")
             self._notify(f"【{app}】有新消息，快去看看吧", duration=8000)
             self._end_reminder(was, delay=9000)
             self._start_unread_timer(app)
@@ -691,13 +907,18 @@ class PetWindow(QWidget):
         if not self.im_watcher.is_unread(app):
             return  # 已经读过了，不再提醒
         was = self._begin_reminder()
-        self._play_feishu_sound()
-        origin = self.pos()
-        self._move_to_center()
-        self._remind_anim.finished.connect(
-            lambda: self._do_jump_and_bubble(f"【{app}】消息还没看，快回来看看！")
-        )
-        QTimer.singleShot(12000, lambda: self._move_back(origin))
+        self._play_sound("msg.wav")
+        tip = f"【{app}】消息还没看，快回来看看！"
+        if config.is_silent_now():
+            # 静默期间不跑到屏幕中心打扰，只在原地弹气泡
+            self._show_bubble(tip, 12000)
+        else:
+            origin = self.pos()
+            self._move_to_center()
+            self._remind_anim.finished.connect(
+                lambda: self._do_jump_and_bubble(tip)
+            )
+            QTimer.singleShot(12000, lambda: self._move_back(origin))
         self._end_reminder(was, delay=14000)
         self._start_unread_timer(app)
 

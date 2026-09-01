@@ -3,8 +3,12 @@
 打包成 PyInstaller onefile 后，程序运行目录是临时解压目录，
 因此数据（日志/配置）写入用户目录，资源从 sys._MEIPASS 读取。
 """
+import datetime
+import json
 import os
 import sys
+import time
+import uuid
 
 from PySide6.QtCore import QSettings
 
@@ -91,7 +95,30 @@ DEFAULTS = {
     "feishu_enabled": True,
     # 未读超时强提醒：某 IM 持续未读超过该秒数，桌宠跑到屏幕中心再提醒
     "unread_center_delay": 120,
+    # 提示音总开关（关闭后所有提醒只弹气泡、不响铃）
+    "sound_enabled": True,
+    # 免打扰时段：生效期间提醒只弹气泡、不响铃不跳跃不移动
+    "quiet_enabled": False,
+    "quiet_start": "22:30",
+    "quiet_end": "08:00",
+    # 专注模式：截止时间戳（time.time()），0 或已过期表示未开启
+    "focus_until": 0,
+    # 贴边隐藏：静止多少秒后滑到屏幕边缘只露一角，鼠标靠近再滑回来
+    "edge_hide_enabled": True,
 }
+
+# 免打扰时段预设（显示名, 开始, 结束）
+QUIET_PRESETS = [
+    ("22:30 - 08:00（夜间）", "22:30", "08:00"),
+    ("23:00 - 07:00（夜间）", "23:00", "07:00"),
+    ("12:30 - 14:00（午休）", "12:30", "14:00"),
+]
+
+# 专注模式时长预设（分钟）
+FOCUS_PRESETS = [30, 60, 120]
+
+# 贴边隐藏：静止超过 N 秒后自动贴边（默认 30s）
+EDGE_HIDE_IDLE_SECONDS = 30
 
 # 喝水提醒可选间隔（分钟）
 DRINK_INTERVALS = [30, 60, 90, 120]
@@ -113,8 +140,14 @@ DRINK_MESSAGES = [
 ]
 
 
-def get(key):
-    return settings().value(key, DEFAULTS.get(key))
+def get(key, default=None):
+    """读取配置。
+
+    default 为 None 时回落到 DEFAULTS 里的值；显式传值则用调用方的兜底。
+    """
+    if default is None:
+        default = DEFAULTS.get(key)
+    return settings().value(key, default)
 
 
 def set_value(key, value) -> None:
@@ -378,3 +411,154 @@ def get_sit_messages():
 
 def get_offwork_messages():
     return OFFWORK_MESSAGES
+
+
+# ---------- 静默控制：提示音 / 免打扰时段 / 专注模式 ----------
+
+def _flag(key: str) -> bool:
+    """读取布尔配置，兼容 QSettings 返回字符串的情况（"false" 不能当真）。"""
+    val = settings().value(key, DEFAULTS.get(key))
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1", "yes", "on")
+    return bool(val)
+
+
+def flag(key: str) -> bool:
+    """公开布尔读取入口（_flag 的同义别名，供 UI 层使用）。"""
+    return _flag(key)
+
+
+def _parse_hm(text):
+    """解析 HH:MM 字符串，失败返回 None。"""
+    try:
+        return datetime.datetime.strptime(str(text), "%H:%M").time()
+    except Exception:
+        return None
+
+
+def quiet_active() -> bool:
+    """当前是否处于免打扰时段。支持跨零点，如 22:30-08:00。"""
+    if not _flag("quiet_enabled"):
+        return False
+    start = _parse_hm(settings().value("quiet_start", DEFAULTS["quiet_start"]))
+    end = _parse_hm(settings().value("quiet_end", DEFAULTS["quiet_end"]))
+    if start is None or end is None:
+        return False
+    now = datetime.datetime.now().time()
+    if start <= end:
+        return start <= now < end
+    return now >= start or now < end
+
+
+def focus_active() -> bool:
+    """专注模式是否生效中。"""
+    try:
+        return float(settings().value("focus_until", 0) or 0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def focus_remaining() -> int:
+    """专注模式剩余秒数，未开启返回 0。"""
+    try:
+        left = float(settings().value("focus_until", 0) or 0) - time.time()
+        return int(left) if left > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_focus_minutes(mins: int) -> None:
+    """开启专注模式若干分钟；mins <= 0 表示立即结束专注。"""
+    set_value("focus_until", 0 if mins <= 0 else time.time() + mins * 60)
+
+
+def is_silent_now() -> bool:
+    """当前是否静默：免打扰时段或专注模式任一生效。
+
+    静默期间提醒只弹气泡，不响铃、不跳跃、不跑到屏幕中心。
+    """
+    return quiet_active() or focus_active()
+
+
+def sound_allowed() -> bool:
+    """是否允许播放提示音：总开关打开且不处于静默状态。"""
+    return _flag("sound_enabled") and not is_silent_now()
+
+
+def sound_enabled() -> bool:
+    """提示音总开关当前值（供托盘勾选显示）。"""
+    return _flag("sound_enabled")
+
+
+def quiet_enabled() -> bool:
+    """免打扰时段开关当前值。"""
+    return _flag("quiet_enabled")
+
+
+def quiet_start() -> str:
+    return str(settings().value("quiet_start", DEFAULTS["quiet_start"]))
+
+
+def quiet_end() -> str:
+    return str(settings().value("quiet_end", DEFAULTS["quiet_end"]))
+
+
+# ---------- 自定义提醒事项 ----------
+
+def get_custom_reminders() -> list:
+    """读取自定义提醒事项列表（JSON 存在 QSettings，字段缺失时补齐默认值）。"""
+    raw = settings().value("custom_reminders", "[]")
+    if isinstance(raw, list):
+        items = raw
+    else:
+        try:
+            items = json.loads(str(raw))
+        except Exception:
+            items = []
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        label = str(it.get("label") or "").strip()
+        time_text = str(it.get("time") or "").strip()
+        if not label or not time_text:
+            continue
+        out.append({
+            "id": str(it.get("id") or uuid.uuid4().hex[:8]),
+            "label": label,
+            "time": time_text,
+            "kind": str(it.get("kind") or "daily"),
+            "weekday": int(it.get("weekday") or 0),
+            "date": str(it.get("date") or ""),
+            "enabled": _flag_item(it.get("enabled", True)),
+        })
+    return out
+
+
+def _flag_item(val) -> bool:
+    """提醒事项的 enabled 字段容错（QSettings 可能回传字符串）。"""
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1", "yes", "on")
+    return bool(val)
+
+
+def save_custom_reminders(items: list) -> None:
+    set_value("custom_reminders", json.dumps(items, ensure_ascii=False))
+
+
+def add_custom_reminder(item: dict) -> None:
+    items = get_custom_reminders()
+    items.append(item)
+    save_custom_reminders(items)
+
+
+def remove_custom_reminder(rid: str) -> None:
+    save_custom_reminders([i for i in get_custom_reminders() if i.get("id") != rid])
+
+
+def set_custom_reminder_enabled(rid: str, enabled: bool) -> None:
+    items = get_custom_reminders()
+    for it in items:
+        if it.get("id") == rid:
+            it["enabled"] = bool(enabled)
+    save_custom_reminders(items)
