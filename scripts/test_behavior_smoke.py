@@ -110,12 +110,11 @@ def main() -> int:
 
     check("单击启动判定定时器", t_single)
 
-    print("[2] 双击：判定定时器被取消，第二次 release 被抑制")
+    print("[2] 双击：判定定时器被取消，第二次 release 被抑制，只跳 1 下")
 
     def t_double():
         window._click_timer.stop()
         window._suppress_click = False
-        window._cancel_pending_jumps()
         jump_calls["n"] = 0
         single_clicks["n"] = 0
 
@@ -128,24 +127,27 @@ def main() -> int:
         assert_true(not window._click_timer.isActive(), "双击后判定定时器必须已停止")
         assert_true(window._suppress_click is False, "第二次 release 应把抑制标志消费掉")
         assert_true(single_clicks["n"] == 0, "双击不应触发单击逻辑")
-        assert_true(len(window._jump_timers) == 3, f"连跳定时器应为 3 个，实际 {len(window._jump_timers)}")
+        assert_true(jump_calls["n"] == 1, f"双击应只跳 1 下，实际 {jump_calls['n']} 下")
+        assert_true(
+            not hasattr(window, "_jump_timers"),
+            "连跳定时器机制应已随 1.6.0 删除",
+        )
 
     check("双击序列完整走通", t_double)
 
-    print("[3] 连点两次双击：连跳不叠加")
+    print("[3] 连点两次双击：每次各跳 1 下，不排队叠加")
 
     def t_double_twice():
-        window._cancel_pending_jumps()
         window._suppress_click = False
+        jump_calls["n"] = 0
         for _ in range(2):
             window.mousePressEvent(make_event(QEvent.Type.MouseButtonPress))
             window.mouseReleaseEvent(make_event(QEvent.Type.MouseButtonRelease))
             window.mouseDoubleClickEvent(make_event(QEvent.Type.MouseButtonDblClick))
             window.mouseReleaseEvent(make_event(QEvent.Type.MouseButtonRelease))
-        assert_true(len(window._jump_timers) == 3, f"连点后仍应为 3 个，实际 {len(window._jump_timers)}")
+        assert_true(jump_calls["n"] == 2, f"两次双击应各跳 1 下共 2 下，实际 {jump_calls['n']} 下")
 
     check("连点双击不叠加", t_double_twice)
-    window._cancel_pending_jumps()
 
     print("[4] 贴边隐藏状态机")
 

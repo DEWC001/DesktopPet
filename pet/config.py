@@ -107,18 +107,7 @@ DEFAULTS = {
     "edge_hide_enabled": True,
     # 离开感知：锁屏/离开时自动静默，回来补报（Windows 会话通知，零轮询开销）
     "away_detect_enabled": True,
-    # 摸头互动：鼠标移到宠物身上会蹭你，累计抚摸会触发大反应
-    "pet_enabled": True,
 }
-
-# 摸头互动参数
-PET_STROKE_DISTANCE = 48   # 在身体上累计移动多少 px 算「摸了一下」
-PET_BIG_REACTION = 8       # 累计摸多少下触发一次大反应（连跳 + 大笑）
-PET_QUOTE_COOLDOWN = 6     # 摸头台词冷却（秒），避免移动鼠标时刷屏
-PET_HIT_ALPHA = 24         # 像素 alpha 大于该值才算摸到身体（精灵图四周是透明的）
-PET_BOUNCE_HEIGHT = 8      # 摸头反馈的弹动高度（px）。注意必须是「图片上下晃」而不是
-                           # 移动窗口：窗口一动就从光标底下溜走，Qt 立刻发 leave 事件，
-                           # 悬停状态被打断，实际效果变成「摸一下就断」。
 
 # 免打扰时段预设（显示名, 开始, 结束）
 QUIET_PRESETS = [
@@ -359,69 +348,6 @@ ACTION_QUOTE_COOLDOWN = 8
 
 def get_happy_messages():
     return HAPPY_MESSAGES
-
-
-# 摸头互动台词（鼠标在宠物身上移动时按冷却随机弹）
-PET_MESSAGES = [
-    "哎呀，痒痒的～",
-    "嘿嘿，摸摸头",
-    "舒服…再摸两下",
-    "被你摸得好开心",
-    "呼噜呼噜…",
-    "头可断，发型不能乱！",
-    "别停，继续～",
-    "你手好暖呀",
-    "摸头是要收费的（开玩笑）",
-]
-
-# 睡觉时被摸醒的迷糊台词
-PET_SLEEPY_MESSAGES = [
-    "唔…别闹，再睡五分钟",
-    "嗯…谁在摸我…",
-    "哈啊——被吵醒了",
-    "困…但是被摸好舒服…",
-    "（迷迷糊糊蹭了蹭你的手）",
-]
-
-# 累计抚摸到阈值的大反应台词
-PET_BIG_MESSAGES = [
-    "好舒服呀，转圈圈！",
-    "摸够啦，我都要飘起来了～",
-    "今天份的开心已充满！",
-    "嘿嘿，最喜欢你了！",
-    "全身都软乎乎的～",
-]
-
-FEIDUDU_PET_MESSAGES = [
-    "摸肚子可以，摸头也行～",
-    "肥嘟嘟的脑袋，随便摸",
-    "再摸就要滚起来了",
-    "胆子肥嘟嘟，随便rua",
-]
-
-FEIDUDU_PET_BIG_MESSAGES = [
-    "肥嘟嘟被摸得圆了一圈！",
-    "呼噜噜～肚皮也给你摸",
-    "舒服得胆子都化了",
-]
-
-
-def get_pet_messages():
-    """按当前皮肤返回摸头台词。"""
-    if current_skin() == "feidudu":
-        return PET_MESSAGES + FEIDUDU_PET_MESSAGES
-    return PET_MESSAGES
-
-
-def get_pet_sleepy_messages():
-    return PET_SLEEPY_MESSAGES
-
-
-def get_pet_big_messages():
-    """按当前皮肤返回大反应台词。"""
-    if current_skin() == "feidudu":
-        return PET_BIG_MESSAGES + FEIDUDU_PET_BIG_MESSAGES
-    return PET_BIG_MESSAGES
 
 
 # 宠物大小可选档位（缩放系数）

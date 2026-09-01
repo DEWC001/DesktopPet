@@ -5,6 +5,65 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.0] - 2026-09-01
+
+> **移除摸头互动**（1.4.0 加的「鼠标悬停会蹭你」），**双击改为只跳 1 下**。
+>
+> 摸头互动不是用户要求的功能，是我自己加的，实际用起来反馈层次跟双击撞车；
+> 1.5.1 只是把「落地弹跳」去掉，但「光标路过就有反应」本身仍然多余——
+> 干脆整个删掉。跳跃现在只有一个来源：**你真的动手点了它**。
+>
+> 双击此前是连跳 3 下（`for i in range(3)` 排 3 个延迟定时器）。1.5.1 的文档
+> 里写成「双击跳一下」但代码是 3 下，**文档与代码不符**误导了排查，本次一并纠正。
+
+### 移除
+
+- **摸头互动**（1.4.0 引入，1.6.0 完全删除）：
+  - `pet/window.py`：删除 `_alpha_image` / `_hit_body` / `_update_pet` / `enterEvent` /
+    `leaveEvent` / `_begin_pet` / `_on_pet_stroke` / `_big_pet_reaction` / `_end_pet` /
+    `_refresh_pet_frame` / `_pet_bounce` / `_set_pet_offset` / `_on_pet_bounce_done` /
+    `_maybe_pet_quote` / `set_pet_enabled` 及 8 个状态字段（−195 行）
+  - `pet/config.py`：删除 `pet_enabled` 配置、`PET_*` 5 个常量、
+    5 张摸头台词表与 3 个 getter（−116 行）
+  - `pet/tray.py`：删除托盘「摸头互动」勾选项与 `_on_pet` 回调
+  - 删除测试脚本：`test_pet_interaction.py`（26 项）、`test_pet_e2e.py`（5 项）、
+    `verify_pet_bounce.py`、`verify_pet_exe.py`
+- **连跳定时器机制**：`_schedule_jump` / `_cancel_pending_jumps` / `_jump_timers`
+  整套删除。只有一次跳跃，就不需要「取消未触发的排队跳跃」了
+
+### 修正
+
+- **双击：连跳 3 下 → 跳 1 下**。连跳是「很兴奋」的表达，双击只是日常打招呼；
+  而且上一次还没落地就排队下一次，观感是抽搐而不是开心。更强的反馈靠
+  表情（laugh 帧持续 1.5 秒）+ 台词，不靠堆次数
+
+### 反馈层次（改后）
+
+| 你的动作 | 桌宠反应 |
+|---|---|
+| 单击 | 跳 1 下，偶尔说句话 |
+| 双击 | 跳 1 下 + laugh 帧 1.5 秒 + 说句开心的话 |
+| 鼠标悬停 | **无反应**（1.4.0 的摸头互动已删除） |
+| 拖拽 | 跟随鼠标移动 |
+
+### 测试
+
+- `scripts/test_behavior_smoke.py`：双击断言从「连跳定时器 == 3 个」改为
+  「`_do_jump` 被调用 1 次」；连点两次双击断言「各跳 1 下共 2 下」；
+  新增断言 `_jump_timers` 字段已不存在，防机制复活
+- `test_menu_smoke.py` 29 → 28 项（摸头勾选项没了，少一项）
+- 全量回归 **146 项全绿**（静默 43 + 菜单 28 + 行为 11 + IM 轮询 20 + 锁屏 24
+  + 番茄钟 15 + 锁屏 e2e 5）
+
+### 踩过的坑
+
+- **批量删除必须 diff 复核**：删 `PET_*` 常量块时按行号区间切，把紧随其后的
+  `QUIET_PRESETS` / `FOCUS_PRESETS` / `POMODORO_*` / `EDGE_HIDE_IDLE_SECONDS` /
+  `DRINK_INTERVALS` / `DRINK_MESSAGES` 一起带走了（−116 行里有 55 行是误删）。
+  现象是 `py_compile` 全绿但跑测试报 `module 'pet.config' has no attribute
+  'DRINK_INTERVALS'`。**教训：删完必须 `git diff | grep '^-'` 逐行看一遍净删除内容，
+  语法检查抓不到这种「删多了」**
+
 ## [1.5.1] - 2026-09-01
 
 > 修正摸头互动的反馈层次：**鼠标刚放上去不再弹跳**。
