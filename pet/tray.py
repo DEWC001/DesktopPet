@@ -55,6 +55,13 @@ class TrayIcon(QSystemTrayIcon):
         self.act_away.setChecked(config.flag("away_detect_enabled"))
         self.act_away.toggled.connect(self._on_away_detect)
 
+        # 摸头互动（鼠标移到宠物身上会蹭你，摸够次数触发大反应）
+        self.act_pet = QAction("摸头互动", self.menu)
+        self.act_pet.setCheckable(True)
+        self.act_pet.setToolTip("鼠标移到宠物身上会蹭你，多摸几下会开心得跳起来")
+        self.act_pet.setChecked(config.flag("pet_enabled"))
+        self.act_pet.toggled.connect(self._on_pet)
+
         # 喝水提醒子菜单
         self.drink_menu = QMenu("喝水提醒", self.menu)
         self.act_drink_enabled = QAction("开启提醒", self.drink_menu)
@@ -261,6 +268,7 @@ class TrayIcon(QSystemTrayIcon):
         self.menu.addAction(self.act_auto)
         self.menu.addAction(self.act_sound)
         self.menu.addAction(self.act_edge_hide)
+        self.menu.addAction(self.act_pet)
         self.menu.addSeparator()
         self.menu.addMenu(self.drink_menu)
         self.menu.addMenu(self.sit_menu)
@@ -380,6 +388,7 @@ class TrayIcon(QSystemTrayIcon):
         self.act_sound.setChecked(config.sound_enabled())
         self.act_edge_hide.setChecked(config.flag("edge_hide_enabled"))
         self.act_away.setChecked(config.flag("away_detect_enabled"))
+        self.act_pet.setChecked(config.flag("pet_enabled"))
         self._sync_interval_checks()
         self._sync_size_checks()
         self._sync_sit_interval_checks()
@@ -492,6 +501,10 @@ class TrayIcon(QSystemTrayIcon):
     def _on_away_detect(self, checked: bool) -> None:
         """离开感知开关：注册/注销 Windows 会话通知。"""
         self.window.set_away_detect(checked)
+
+    def _on_pet(self, checked: bool) -> None:
+        """摸头互动开关。"""
+        self.window.set_pet_enabled(checked)
 
     def _on_focus(self, mins: int) -> None:
         """开启专注模式若干分钟；0 表示立即结束专注。"""

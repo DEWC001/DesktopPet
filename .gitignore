@@ -29,3 +29,6 @@ lingxi_tray_diag.log
 **/_clear_text.py
 **/_rewalk.py
 **/extra/
+
+# 测试输出
+scripts/_out/

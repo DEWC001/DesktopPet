@@ -6,8 +6,15 @@ import os
 import random
 import time
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+)
+from PySide6.QtGui import QCursor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from . import config
@@ -39,6 +46,8 @@ class PetWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 摸头互动需要无按键时的鼠标移动事件
+        self.setMouseTracking(True)
 
         self.scale = float(config.get("scale"))
 
@@ -51,6 +60,9 @@ class PetWindow(QWidget):
         self.setFixedSize(idle.width() + self._margin * 2, idle.height() + self._margin * 2)
         self.label = QLabel(self)
         self.label.setGeometry(self._margin, self._margin, idle.width(), idle.height())
+        # 图片标签只负责显示：鼠标事件一律透传给窗口本体处理，
+        # 否则 move 事件会被标签吃掉，摸头互动收不到（press 靠 ignore 上传是侥幸）
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         # 运行时状态
         self._blinking = False
@@ -88,6 +100,15 @@ class PetWindow(QWidget):
         self._missed_custom: list[str] = []
         self.bubble = None
         self.tray = None
+        # 摸头互动状态
+        self._hovering = False          # 鼠标是否正停在宠物身体上
+        self._pet_bouncing = False      # 弹动动画进行中（避免叠加导致窗口卡在半空）
+        self._pet_anim = None
+        self._pet_strokes = 0           # 本轮累计抚摸次数（达到阈值触发大反应）
+        self._pet_move_accum = 0.0      # 身体上累计移动距离（px）
+        self._pet_last_pos = None
+        self._last_pet_quote_at = 0.0
+        self._pet_offset = 0        # 摸头反馈的精灵纵向偏移（只晃图片，窗口不动）
 
         # 呼吸/漂浮
         self.breath_timer = QTimer(self)
@@ -188,6 +209,8 @@ class PetWindow(QWidget):
         """加载当前皮肤的全部基础+扩展帧；缺失基础帧回退 idle，缺失扩展帧跳过。
         返回 idle 帧（用于尺寸/位置参考）。"""
         self.frames: dict[str, QPixmap] = {}
+        # 命中检测的 alpha 图缓存（换肤/改大小后必须失效，所以在这里重建）
+        self._alpha_cache: dict[str, QImage] = {}
         for name in FRAME_NAMES:
             pix = self._load(f"{name}.png")
             self.frames[name] = self._fit(pix) if not pix.isNull() else None
@@ -321,7 +344,7 @@ class PetWindow(QWidget):
         px = self._breath_cache[name][idx]
         self.label.setPixmap(px)
         x = (self.width() - px.width()) // 2
-        y = self._margin + int(amp * math.sin(self._phase * 0.8))
+        y = self._margin + int(amp * math.sin(self._phase * 0.8)) - self._pet_offset
         self.label.setGeometry(x, y, px.width(), px.height())
 
     def _schedule_blink(self) -> None:
@@ -437,6 +460,10 @@ class PetWindow(QWidget):
             if self._moved:
                 self.move(self._win_origin + delta)
             e.accept()
+            return
+        # 非拖拽时用于摸头互动（需要 setMouseTracking(True) 才会有事件）
+        self._update_pet(e.position().toPoint())
+        super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -512,6 +539,183 @@ class PetWindow(QWidget):
     def _end_jump(self) -> None:
         self._jumping = False
         self._mark_movement()
+
+    # ---------- 摸头互动 ----------
+    def _alpha_image(self, name: str):
+        """取某一帧的 alpha 图（缓存），供像素级命中检测使用。"""
+        img = self._alpha_cache.get(name)
+        if img is None:
+            base = self.frames.get(name)
+            if base is None or base.isNull():
+                return None
+            img = base.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+            self._alpha_cache[name] = img
+        return img
+
+    def _hit_body(self, pos) -> bool:
+        """鼠标是否真的落在宠物身体上（而不是精灵图四周的透明矩形）。
+
+        精灵图是方形的、宠物只占中间一块，按矩形判断会导致「鼠标从旁边
+        飘过也算摸头」。所以按 alpha 通道做像素级命中。
+
+        固定用 **idle 帧**而不是当前帧：摸头会临时切到 laugh 帧，而有些皮肤
+        （feidudu）laugh 与 idle 的轮廓有约 20% 不重合，跟着当前帧走会导致
+        「摸着摸着光标掉出身体，互动中断」。
+        """
+        name = "idle" if "idle" in self.frames else self._current_frame_name()
+        img = self._alpha_image(name)
+        if img is None or img.isNull():
+            return False
+        pm = self.label.pixmap()
+        if pm is None or pm.isNull() or pm.width() <= 0 or pm.height() <= 0:
+            return False
+        x = pos.x() - self.label.x()
+        y = pos.y() - self.label.y()
+        if x < 0 or y < 0 or x >= pm.width() or y >= pm.height():
+            return False
+        px = int(x * img.width() / pm.width())
+        py = int(y * img.height() / pm.height())
+        if px < 0 or py < 0 or px >= img.width() or py >= img.height():
+            return False
+        return img.pixelColor(px, py).alpha() > config.PET_HIT_ALPHA
+
+    def _update_pet(self, pos) -> None:
+        """鼠标移动：进入/离开身体、累计抚摸距离。"""
+        if not config.flag("pet_enabled"):
+            return
+        if self._away:
+            return  # 锁屏期间鼠标事件无意义
+        hit = self._hit_body(pos)
+        if hit and not self._hovering:
+            self._begin_pet()
+        elif not hit and self._hovering:
+            self._end_pet()
+            return
+        if not hit:
+            self._pet_last_pos = None
+            return
+        if self._pet_last_pos is not None:
+            step = (pos - self._pet_last_pos).manhattanLength()
+            self._pet_move_accum += step
+            # 用 if 而不是 while：一次「快速甩过去」只算一次抚摸，
+            # 否则一个大跨度的 move 事件会一次性记好几下，直接触发大反应。
+            if self._pet_move_accum >= config.PET_STROKE_DISTANCE:
+                self._pet_move_accum = 0.0
+                self._on_pet_stroke()
+        self._pet_last_pos = pos
+
+    def enterEvent(self, e) -> None:
+        # Qt 行为：光标进入 layered（半透明）窗口时的第一条 WM_MOUSEMOVE
+        # 只会转成 Enter 事件、**不会**转成 MouseMove。只靠 mouseMoveEvent
+        # 的话，「把鼠标挪到宠物身上然后停住」将毫无反应，必须再抖一下才有。
+        # 所以进入时也驱动一次命中判断。
+        self._update_pet(self.mapFromGlobal(QCursor.pos()))
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        # 跳跃 / 贴边动画把窗口从光标底下挪走时也会收到 leave，
+        # 那不是「用户走了」。只有光标真的不在窗口范围内才结束互动。
+        if not self.geometry().contains(QCursor.pos()):
+            self._end_pet()
+        super().leaveEvent(e)
+
+    def _begin_pet(self) -> None:
+        """鼠标刚落到身上：醒来（若在睡）、切笑帧、弹一下、按冷却说一句。"""
+        self._hovering = True
+        self._pet_last_pos = None
+        self._pet_move_accum = 0.0
+        self._mark_movement()  # 正在互动，别在这时候贴边隐藏
+        if self.brain.state == PetBrain.SLEEP:
+            self.brain.poke()
+            self._maybe_pet_quote(config.get_pet_sleepy_messages())
+            return
+        self._refresh_pet_frame()
+        self._pet_bounce()
+        self._maybe_pet_quote(config.get_pet_messages())
+
+    def _on_pet_stroke(self) -> None:
+        """累计移动达标 = 摸了一下：续期笑帧、弹一下、计数。"""
+        self._pet_strokes += 1
+        self._refresh_pet_frame()
+        self._pet_bounce()
+        self._maybe_pet_quote(config.get_pet_messages())
+        self._mark_movement()
+        if self._pet_strokes >= config.PET_BIG_REACTION:
+            self._pet_strokes = 0
+            self._big_pet_reaction()
+
+    def _big_pet_reaction(self) -> None:
+        """摸够次数：连跳两下 + 大笑帧 + 专属台词（静默时只留台词）。"""
+        self._refresh_pet_frame(3.0)
+        if not config.is_silent_now():
+            self._cancel_pending_jumps()
+            for i in range(2):
+                self._schedule_jump(i * 300)
+        self._maybe_pet_quote(config.get_pet_big_messages(), ignore_cooldown=True)
+
+    def _end_pet(self) -> None:
+        """鼠标离开身体：重置累计，笑帧不立即清，让它自然过期（摸完还笑一会儿）。"""
+        self._hovering = False
+        self._pet_last_pos = None
+        self._pet_move_accum = 0.0
+
+    def _refresh_pet_frame(self, seconds: float = 2.0) -> None:
+        """切到笑帧并在 N 秒后自动失效（没有 laugh 帧的皮肤就保持原样）。"""
+        if "laugh" in self.frames:
+            self._override_frame = "laugh"
+            self._override_until = time.time() * 1000 + seconds * 1000
+
+    def _pet_bounce(self) -> None:
+        """摸头反馈：精灵小幅弹一下（比跳跃幅度小得多，不打断呼吸）。
+
+        刻意**不移动窗口**——窗口一动就从光标底下溜走，Qt 会立刻发 leave
+        事件把悬停状态打断，实际效果变成「摸一下就断」。改成只晃图片。
+
+        静默（免打扰/专注）时不弹——专注模式下桌宠不该乱动。
+        """
+        if self._pet_bouncing or self._jumping or self._drag or self._away:
+            return
+        if self._edge_state in ("hiding", "showing"):
+            return
+        if config.is_silent_now():
+            return
+        self._pet_bouncing = True
+        anim = QVariantAnimation(self)
+        anim.setDuration(260)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        peak = config.PET_BOUNCE_HEIGHT
+        anim.valueChanged.connect(
+            lambda v: self._set_pet_offset(int(peak * math.sin(math.pi * v)))
+        )
+        anim.finished.connect(self._on_pet_bounce_done)
+        self._pet_anim = anim
+        anim.start()
+        self._mark_movement()
+
+    def _set_pet_offset(self, value: int) -> None:
+        self._pet_offset = int(value)
+
+    def _on_pet_bounce_done(self) -> None:
+        self._pet_bouncing = False
+        self._pet_offset = 0
+
+    def _maybe_pet_quote(self, messages, ignore_cooldown: bool = False) -> None:
+        """按冷却弹摸头台词；提醒气泡正在显示时不抢它的位置。"""
+        now = time.time()
+        if not ignore_cooldown and now - self._last_pet_quote_at < config.PET_QUOTE_COOLDOWN:
+            return
+        self._last_pet_quote_at = now
+        if self.bubble is not None and self.bubble.isVisible():
+            return
+        self._say(messages)
+
+    def set_pet_enabled(self, enabled: bool) -> None:
+        """托盘开关：停用摸头互动时立刻结束进行中的互动。"""
+        config.set_value("pet_enabled", bool(enabled))
+        if not enabled:
+            self._end_pet()
 
     # ---------- 贴边隐藏 ----------
     def _setup_edge_hide_timer(self) -> None:
