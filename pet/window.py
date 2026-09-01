@@ -634,7 +634,12 @@ class PetWindow(QWidget):
         super().leaveEvent(e)
 
     def _begin_pet(self) -> None:
-        """鼠标刚落到身上：醒来（若在睡）、切笑帧、弹一下、按冷却说一句。"""
+        """鼠标刚落到身上：醒来（若在睡）、切笑帧、按冷却说一句。**不弹动**。
+
+        刻意不在落地时弹跳：跳跃是「主动互动」的反馈（双击跳、抚摸一下跳一下、
+        摸够次数连跳），光标只是路过悬停就自己蹦一下，会跟双击的反馈撞车，
+        观感上像「我还没点它怎么就动了」。落地只给安静的反馈：切表情 + 说话。
+        """
         self._hovering = True
         self._pet_last_pos = None
         self._pet_move_accum = 0.0
@@ -644,7 +649,6 @@ class PetWindow(QWidget):
             self._maybe_pet_quote(config.get_pet_sleepy_messages())
             return
         self._refresh_pet_frame()
-        self._pet_bounce()
         self._maybe_pet_quote(config.get_pet_messages())
 
     def _on_pet_stroke(self) -> None:

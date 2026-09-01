@@ -24,23 +24,48 @@ from PIL import ImageGrab  # noqa: E402
 user32 = ctypes.windll.user32
 
 
+def pet_pids() -> set:
+    """按进程名枚举 PID。
+
+    不能用 `tasklist`：它的输出是 GBK，用 text=True 读会 UnicodeDecodeError。
+    直接走 CreateToolhelp32Snapshot + PROCESSENTRY32W，纯 ctypes 无编码问题。
+
+    注意 onefile 打包会 fork 出**两个**同名进程（bootloader 父进程 + 真正的
+    应用子进程），窗口在子进程里，所以必须全收，不能只认 Popen 返回的 PID。
+    """
+    kernel32 = ctypes.windll.kernel32
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snap == -1:
+        return set()
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    pids = set()
+    try:
+        if kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+            while True:
+                if entry.szExeFile.lower() == "desktoppet.exe":
+                    pids.add(entry.th32ProcessID)
+                if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                    break
+    finally:
+        kernel32.CloseHandle(snap)
+    return pids
+
+
 def enum_pet_hwnds() -> list:
     """枚举属于 DesktopPet 进程的可见窗口。"""
-    import subprocess
-
-    out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq DesktopPet.exe", "/FO", "CSV", "/NH"],
-        capture_output=True,
-        text=True,
-    )
-    pids = set()
-    for line in out.stdout.splitlines():
-        parts = [p.strip('"') for p in line.split(",")]
-        if len(parts) >= 2 and parts[0].startswith("DesktopPet"):
-            try:
-                pids.add(int(parts[1]))
-            except ValueError:
-                pass
+    pids = pet_pids()
     if not pids:
         return []
 

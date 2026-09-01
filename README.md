@@ -8,7 +8,7 @@
 
 操作：
 - **拖拽**：按住左键拖动到任意位置
-- **摸头**：把鼠标移到它身上来回蹭，会切笑帧、弹一下、说两句；**连续摸够 8 下**会开心得跳起来
+- **摸头**：把鼠标移到它身上会切笑帧、说两句；来回蹭会弹一下，**连续摸够 8 下**会开心得连跳两下
 - **单击**：跳跃反馈；**双击**：开心连跳
 - **右键宠物或托盘**：置顶 / 隐藏 / 开机自启 / 提示音 / 贴边隐藏 / 摸头互动 / 各类提醒设置 / 退出
 
@@ -18,11 +18,14 @@
 
 | 行为 | 反馈 |
 | --- | --- |
-| 鼠标移到身上 | 切笑帧 + 弹一下 + 说一句（台词 6 秒冷却，不刷屏） |
+| 鼠标移到身上（不动） | 切笑帧 + 说一句（**不弹跳**，台词 6 秒冷却，不刷屏） |
 | 睡觉时被摸 | 醒来，说句迷糊话 |
-| 在身上来回移动 | 每累计 48px 算「摸了一下」，每下都有反馈 |
+| 在身上来回移动 | 每累计 48px 算「摸了一下」，弹一下 + 说一句 |
 | 连续摸够 8 下 | 连跳两下 + 大笑帧 3 秒 + 专属台词 |
+| 双击 | 跳一下 |
 | 鼠标移开 | 停止计数，笑帧自然过期（摸完还笑一会儿） |
+
+> **1.5.1 起落地不再弹跳**。跳跃是「主动互动的奖励」——你得真的做了点什么（移动抚摸 / 双击）它才跳；单纯把光标放上去只给安静的反馈（表情 + 台词），否则会跟双击的反馈撞车，看着像「我还没点它怎么自己动了」。
 
 - 托盘「摸头互动」可关闭（默认开）。
 - 静默（免打扰时段 / 专注模式）期间摸头**只切表情、不弹动也不响铃**——免打扰针对的是未经请求的提醒，你主动摸它仍然会给回应，但不会打扰你。
@@ -180,7 +183,7 @@ build.bat
 │   ├── test_im_polling.py       # IM 轮询自测（20 项）：降频状态机/任务栏缓存/检测等价性
 │   ├── test_session_monitor.py  # 锁屏感知自测（24 项）：消息解析/离开静默/补报文案
 │   ├── test_session_e2e.py      # 锁屏端到端（5 项）：真窗口 + SendMessage 投递会话消息
-│   ├── test_pet_interaction.py  # 摸头互动自测（25 项）：像素命中/抚摸累计/静默分支
+│   ├── test_pet_interaction.py  # 摸头互动自测（26 项）：像素命中/抚摸累计/落地不跳/静默分支
 │   ├── test_pet_e2e.py          # 摸头端到端（5 项）：真移动系统光标，验事件投递链路
 │   ├── test_pomodoro.py         # 番茄钟自测（14 项）：状态机/阶段切换/跨日计数/静默集成
 │   ├── bench_im_polling.py      # 实机量化 IM 轮询开销（优化前 vs 优化后）
@@ -200,7 +203,7 @@ python scripts/test_menu_smoke.py       # 27 项，真构造 TrayIcon
 python scripts/test_behavior_smoke.py   # 11 项，真构造 PetWindow + 鼠标事件
 python scripts/test_im_polling.py       # 20 项，IM 轮询降频与检测等价性
 python scripts/test_session_monitor.py  # 24 项，锁屏感知（offscreen）
-python scripts/test_pet_interaction.py  # 25 项，摸头互动（offscreen）
+python scripts/test_pet_interaction.py  # 26 项，摸头互动（offscreen）
 python scripts/test_pomodoro.py         # 14 项，番茄钟（offscreen）
 python scripts/test_session_e2e.py      # 5 项，锁屏端到端（需真实桌面，勿设 offscreen）
 python scripts/test_pet_e2e.py          # 5 项，摸头端到端（需真实桌面，勿设 offscreen）

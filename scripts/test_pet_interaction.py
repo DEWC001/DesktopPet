@@ -200,12 +200,27 @@ def main() -> int:
         calls["bounce"] = 0
         window._update_pet(point_at(window, 0.5, 0.5))
         assert_true(window._hovering, "落到身上应进入互动态")
-        assert_true(calls["bounce"] == 1, f"进入时应弹一下，实际 {calls['bounce']}")
+        # 落地**不弹跳**：蹦一下会跟「双击跳」的反馈撞车，用户会以为自己点到了
+        assert_true(calls["bounce"] == 0, f"落地不应弹跳，实际 {calls['bounce']}")
         assert_true(
             window._override_frame == "laugh", "有 laugh 帧时应切到笑帧"
         )
 
-    check("鼠标落到身上触发互动", t_enter_body)
+    check("鼠标落到身上触发互动（只切表情，不弹跳）", t_enter_body)
+
+    def t_enter_then_stroke_bounces():
+        """落地不跳、动起来摸才跳——两个动作必须有区别。"""
+        install_body(window)
+        reset_pet(window)
+        window.brain.state = PetBrain.IDLE
+        calls["bounce"] = 0
+        # 两个点都要落在 body box（20~80）内，否则会掉出身体退出互动态
+        window._update_pet(point_at(window, 0.25, 0.5))  # 落地
+        assert_true(calls["bounce"] == 0, "落地阶段不应弹跳")
+        window._update_pet(point_at(window, 0.75, 0.5))  # 横移 60px+ → 记一次抚摸
+        assert_true(calls["bounce"] == 1, f"抚摸一下应弹跳，实际 {calls['bounce']}")
+
+    check("落地不跳 / 抚摸才跳（与双击反馈区分）", t_enter_then_stroke_bounces)
 
     def t_enter_miss_noop():
         install_body(window)
@@ -317,7 +332,9 @@ def main() -> int:
         config.is_silent_now = lambda: True
         try:
             calls["bounce"] = 0
-            window._update_pet(point_at(window, 0.5, 0.5))
+            # 落地 + 抚摸：确认静默时 _pet_bounce 被调起但内部自行跳过
+            window._update_pet(point_at(window, 0.25, 0.5))
+            window._update_pet(point_at(window, 0.75, 0.5))
             assert_true(window._hovering, "静默时仍应识别互动（只是不动）")
             assert_true(calls["bounce"] == 1, "仍调用 _pet_bounce（内部自行跳过）")
             assert_true(window._pet_anim is None, "静默时不应真的起跳/弹动")
