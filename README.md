@@ -178,15 +178,17 @@ build.bat
 │   └── sounds/             # 提示音 drink.wav / msg.wav
 ├── scripts/                # 素材/音效生成、验证脚本
 │   ├── test_silence.py          # 静默逻辑单测（43 项）：免打扰跨零点/专注/音效
-│   ├── test_menu_smoke.py       # 托盘菜单冒烟（27 项）：offscreen 真构造并遍历触发菜单
+│   ├── test_menu_smoke.py       # 托盘菜单冒烟（29 项）：offscreen 真构造并遍历触发菜单
 │   ├── test_behavior_smoke.py   # 行为冒烟（11 项）：双击序列/贴边隐藏/计时独立/自定义提醒
 │   ├── test_im_polling.py       # IM 轮询自测（20 项）：降频状态机/任务栏缓存/检测等价性
 │   ├── test_session_monitor.py  # 锁屏感知自测（24 项）：消息解析/离开静默/补报文案
 │   ├── test_session_e2e.py      # 锁屏端到端（5 项）：真窗口 + SendMessage 投递会话消息
 │   ├── test_pet_interaction.py  # 摸头互动自测（26 项）：像素命中/抚摸累计/落地不跳/静默分支
 │   ├── test_pet_e2e.py          # 摸头端到端（5 项）：真移动系统光标，验事件投递链路
-│   ├── test_pomodoro.py         # 番茄钟自测（14 项）：状态机/阶段切换/跨日计数/静默集成
+│   ├── test_pomodoro.py         # 番茄钟自测（15 项）：状态机/阶段切换/跨日计数/静默集成
 │   ├── bench_im_polling.py      # 实机量化 IM 轮询开销（优化前 vs 优化后）
+│   ├── verify_pet_bounce.py     # 实机验证落地不弹跳 / 抚摸才弹跳（用 [pet-bounce] 日志计数）
+│   ├── verify_pet_exe.py        # 打包版 exe 摸头实机验证（截图像素 diff）
 │   ├── gen_default_extras.py    # 基于 idle.png 合成 drink/think/laugh 扩展帧
 │   └── process_skins.py         # 批量抠图 + 对齐 + 缩放（依赖 rembg）
 ├── raw/                    # AI 原始图生图（开发用，不打进 exe）
@@ -199,15 +201,17 @@ build.bat
 
 ```bash
 python scripts/test_silence.py          # 43 项，纯逻辑
-python scripts/test_menu_smoke.py       # 27 项，真构造 TrayIcon
+python scripts/test_menu_smoke.py       # 29 项，真构造 TrayIcon
 python scripts/test_behavior_smoke.py   # 11 项，真构造 PetWindow + 鼠标事件
 python scripts/test_im_polling.py       # 20 项，IM 轮询降频与检测等价性
 python scripts/test_session_monitor.py  # 24 项，锁屏感知（offscreen）
 python scripts/test_pet_interaction.py  # 26 项，摸头互动（offscreen）
-python scripts/test_pomodoro.py         # 14 项，番茄钟（offscreen）
+python scripts/test_pomodoro.py         # 15 项，番茄钟（offscreen）
 python scripts/test_session_e2e.py      # 5 项，锁屏端到端（需真实桌面，勿设 offscreen）
 python scripts/test_pet_e2e.py          # 5 项，摸头端到端（需真实桌面，勿设 offscreen）
 python scripts/bench_im_polling.py      # 实机量化轮询开销（可选）
+python scripts/verify_pet_bounce.py     # 实机验证「落地不弹跳 / 抚摸才弹跳」（需先在 _pet_bounce 临时插日志）
+python scripts/verify_pet_exe.py        # 打包版 exe 摸头互动实机验证（截图像素 diff）
 ```
 
 > 这三个测试存在的理由：1.2.0 曾出现 `config.get() takes 1 positional
