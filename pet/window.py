@@ -38,26 +38,9 @@ class PetWindow(QWidget):
 
         self.scale = float(config.get("scale"))
 
-        # 加载所有精灵帧，缺失帧回退 idle
+        # 加载所有精灵帧（基础 + 扩展），缺失基础帧回退 idle，缺失扩展帧跳过
         self.frames: dict[str, QPixmap] = {}
-        idle = None
-        for name in FRAME_NAMES:
-            pix = self._load(f"{name}.png")
-            self.frames[name] = self._fit(pix) if not pix.isNull() else None
-            if name == "idle":
-                idle = self.frames["idle"]
-        if idle is None:
-            idle = QPixmap(120, 120)
-            idle.fill(Qt.GlobalColor.transparent)
-            self.frames["idle"] = idle
-        for name in FRAME_NAMES:
-            if self.frames[name] is None:
-                self.frames[name] = idle
-        # 加载扩展动作帧（存在则用，不存在时跳过，_current_frame_name 会回退 idle）
-        for name in EXTRA_FRAME_NAMES:
-            pix = self._load(f"{name}.png")
-            if not pix.isNull():
-                self.frames[name] = self._fit(pix)
+        idle = self._load_all_frames()
         self._rebuild_breath_cache()
 
         self._margin = 8
@@ -167,6 +150,28 @@ class PetWindow(QWidget):
         self._unread_timers = {}
 
     # ---------- 素材 ----------
+    def _load_all_frames(self) -> QPixmap:
+        """加载当前皮肤的全部基础+扩展帧；缺失基础帧回退 idle，缺失扩展帧跳过。
+        返回 idle 帧（用于尺寸/位置参考）。"""
+        self.frames: dict[str, QPixmap] = {}
+        for name in FRAME_NAMES:
+            pix = self._load(f"{name}.png")
+            self.frames[name] = self._fit(pix) if not pix.isNull() else None
+        if self.frames["idle"] is None:
+            idle = QPixmap(120, 120)
+            idle.fill(Qt.GlobalColor.transparent)
+            self.frames["idle"] = idle
+        idle = self.frames["idle"]
+        for name in FRAME_NAMES:
+            if self.frames[name] is None:
+                self.frames[name] = idle
+        # 扩展动作帧（存在则用，不存在时跳过，_current_frame_name 会回退 idle）
+        for name in EXTRA_FRAME_NAMES:
+            pix = self._load(f"{name}.png")
+            if not pix.isNull():
+                self.frames[name] = self._fit(pix)
+        return idle
+
     def _load(self, name: str) -> QPixmap:
         skin = config.current_skin()
         if skin == "default":
@@ -184,21 +189,7 @@ class PetWindow(QWidget):
         if name == config.current_skin():
             return  # 已是当前皮肤
         config.set_value("skin", name)
-        # 重新加载所有帧
-        self.frames: dict[str, QPixmap] = {}
-        idle = None
-        for frame_name in FRAME_NAMES:
-            pix = self._load(f"{frame_name}.png")
-            self.frames[frame_name] = self._fit(pix) if not pix.isNull() else None
-            if frame_name == "idle":
-                idle = self.frames["idle"]
-        if idle is None:
-            idle = QPixmap(120, 120)
-            idle.fill(Qt.GlobalColor.transparent)
-            self.frames["idle"] = idle
-        for frame_name in FRAME_NAMES:
-            if self.frames[frame_name] is None:
-                self.frames[frame_name] = idle
+        idle = self._load_all_frames()
         self._rebuild_breath_cache()
         # 保持窗口中心调整尺寸
         center = self.geometry().center()
@@ -223,17 +214,7 @@ class PetWindow(QWidget):
         """切换宠物大小：重新加载帧、保持窗口中心不变调整尺寸。"""
         self.scale = max(0.3, min(2.0, float(scale)))
         config.set_value("scale", self.scale)
-        idle = None
-        for name in FRAME_NAMES:
-            pix = self._load(f"{name}.png")
-            self.frames[name] = self._fit(pix) if not pix.isNull() else None
-            if name == "idle":
-                idle = self.frames[name]
-        if idle is None:
-            idle = self.frames["idle"]
-        for name in FRAME_NAMES:
-            if self.frames[name] is None:
-                self.frames[name] = idle
+        idle = self._load_all_frames()
         self._rebuild_breath_cache()
         center = self.geometry().center()
         self.setFixedSize(idle.width() + self._margin * 2, idle.height() + self._margin * 2)
@@ -242,10 +223,13 @@ class PetWindow(QWidget):
         self._save_pos()
 
     def _rebuild_breath_cache(self) -> None:
-        """预生成各帧的缩放级别缓存，供呼吸动画直接取用。"""
+        """预生成各帧的缩放级别缓存，供呼吸动画直接取用。
+        覆盖所有已加载帧（含扩展帧 drink/think/laugh），避免 _current_frame_name
+        返回扩展帧时 KeyError。"""
         self._breath_cache = {}
-        for name in FRAME_NAMES:
-            base = self.frames[name]
+        for name, base in self.frames.items():
+            if base is None or base.isNull():
+                continue
             self._breath_cache[name] = [
                 base.scaled(
                     max(1, int(base.width() * s)),

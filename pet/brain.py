@@ -14,18 +14,21 @@ class PetBrain(QObject):
 
     state_changed = Signal(str)
 
-    # 各状态持续时长（毫秒）：睡眠是主要状态（长时间），活动短暂
+    # 各状态持续时长（毫秒）：睡眠相对短（30-80s），让宠物更常醒来活动
     DURATIONS = {
-        IDLE: (8000, 20000),
-        WALK: (6000, 15000),
+        IDLE: (8000, 18000),
+        WALK: (8000, 16000),
         JUMP: (1500, 2500),
-        SLEEP: (90000, 240000),
-        CHAT: (4000, 6000),
-        WANDER: (2000, 4000),
+        SLEEP: (30000, 80000),   # 原本 90-240s 太长，缩到 30-80s
+        CHAT: (4500, 7000),
+        WANDER: (2500, 5000),
     }
 
-    # 醒来后的活动选项
-    AWAKE_ACTIONS = [IDLE, WALK, JUMP, CHAT]
+    # 醒来后的活动选项（含 WANDER 散步到随机位置，让宠物真正"会移动"）
+    AWAKE_ACTIONS = [IDLE, WALK, JUMP, CHAT, WANDER, WANDER]  # WANDER 加权
+
+    # 活动结束后的回睡概率（0.45 = 大半时间在外面活动，只有不到一半回去睡）
+    RESLEEP_PROB = 0.45
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,8 +64,8 @@ class PetBrain(QObject):
             # 睡醒了，进入短暂活动
             nxt = random.choice(self.AWAKE_ACTIONS)
         else:
-            # 活动结束，大概率回去睡觉，偶尔继续活动
-            if random.random() < 0.8:
+            # 活动结束，按概率决定回睡还是继续活动（45% 回睡，比原来 80% 少很多）
+            if random.random() < self.RESLEEP_PROB:
                 nxt = self.SLEEP
             else:
                 nxt = random.choice(self.AWAKE_ACTIONS)

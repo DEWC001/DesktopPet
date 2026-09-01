@@ -5,6 +5,38 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-09-01
+
+> 本次聚焦「体验一致性」：feidudu 皮肤补齐睡觉 ZZZ 视觉、修复扩展帧
+> 在切肤/缩放后丢失的隐患与呼吸缓存崩溃风险、状态机改为更活泼的
+> 节奏（缩短睡眠、降低回睡概率、增加散步）。
+
+### 新增
+
+- **feidudu 睡觉帧加 ZZZ**：用 PIL 在 `assets/skins/feidudu/sleep.png`
+  右上方绘制三个 Z（白底蓝灰描边，由下到上由大到小），模拟从鼻子
+  呼出飘向天空。`scripts/draw_zzz.py` 通用（也支持原企鹅 sleep.png，
+  作为可重用的素材工具）。原图备份在 `raw/skins_backup/feidudu_sleep_orig.png`。
+
+### 修复
+
+- **扩展帧（drink/think/laugh）在切肤/缩放后丢失**：`set_skin` 和
+  `set_scale` 重新加载帧时只重建基础 6 帧，没带扩展帧，导致切到
+  feidudu 后 drink 帧消失、喝水提醒无法显示 drink 图。抽
+  `_load_all_frames()` 统一加载基础+扩展帧，3 个入口共用。
+- **呼吸缓存缺扩展帧，触发 `KeyError` 崩溃**：`_rebuild_breath_cache`
+  只缓存 6 个基础帧；`_current_frame_name()` 返回 drink/think/laugh
+  时 `_breath_cache[name]` 抛 `KeyError`，呼吸 timer 异常→桌宠静默
+  卡死。改为对所有已加载帧都建呼吸缓存。
+
+### 变更
+
+- **状态机更活跃**（`pet/brain.py`）：
+  - `SLEEP` 时长 90-240s → **30-80s**（睡眠为主改为睡眠短暂）
+  - 活动结束回睡概率 0.8 → **0.45**（多半时间在外面活动）
+  - `AWAKE_ACTIONS` 加入 `WANDER`（散步到随机位置，×2 加权），
+    解决了"只会睡觉不会移动"的问题
+
 ## [1.1.0] - 2026-08-30
 
 > 本次更新围绕「换肤」与「互动性」展开：新增多皮肤支持、全新的
