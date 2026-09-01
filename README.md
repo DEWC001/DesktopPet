@@ -40,7 +40,9 @@
 - **免打扰时段**（托盘子菜单）：预设（22:30-08:00 / 23:00-07:00 / 12:30-14:00）或自定义起止时间，支持跨零点。生效期间提醒只弹气泡，不响铃、不跳跃、喝水不跑到屏幕中心、IM 未读超时强提醒只在原地弹气泡。
 - **专注模式**（托盘子菜单）：30 / 60 / 120 分钟。菜单标题实时显示「专注中 · 剩 X 分钟」方便看状态。专注期间同样完全静默，但有明确结束时间。
 
-「免打扰时段」与「专注模式」可叠加使用（任一生效即静默）。
+- **番茄钟**（1.5.0，托盘子菜单）：经典 25+5 循环（每 4 个 work 后长休 15 分钟）。阶段切换时桌宠会切表情（work → think 严肃，break → laugh 开心）+ 弹气泡。菜单标题显示「🍅 工作中 · 剩 X 分」/「☕ 休息中 · 剩 X 分」。与专注模式并存但独立——专注是任意时长静默，番茄是循环阶段静默。
+
+→「免打扰时段」「专注模式」「番茄钟」可叠加使用（任一生效即静默）。
 
 ### 离开感知（1.3.0）
 
@@ -180,6 +182,7 @@ build.bat
 │   ├── test_session_e2e.py      # 锁屏端到端（5 项）：真窗口 + SendMessage 投递会话消息
 │   ├── test_pet_interaction.py  # 摸头互动自测（25 项）：像素命中/抚摸累计/静默分支
 │   ├── test_pet_e2e.py          # 摸头端到端（5 项）：真移动系统光标，验事件投递链路
+│   ├── test_pomodoro.py         # 番茄钟自测（14 项）：状态机/阶段切换/跨日计数/静默集成
 │   ├── bench_im_polling.py      # 实机量化 IM 轮询开销（优化前 vs 优化后）
 │   ├── gen_default_extras.py    # 基于 idle.png 合成 drink/think/laugh 扩展帧
 │   └── process_skins.py         # 批量抠图 + 对齐 + 缩放（依赖 rembg）
@@ -198,6 +201,7 @@ python scripts/test_behavior_smoke.py   # 11 项，真构造 PetWindow + 鼠标�
 python scripts/test_im_polling.py       # 20 项，IM 轮询降频与检测等价性
 python scripts/test_session_monitor.py  # 24 项，锁屏感知（offscreen）
 python scripts/test_pet_interaction.py  # 25 项，摸头互动（offscreen）
+python scripts/test_pomodoro.py         # 14 项，番茄钟（offscreen）
 python scripts/test_session_e2e.py      # 5 项，锁屏端到端（需真实桌面，勿设 offscreen）
 python scripts/test_pet_e2e.py          # 5 项，摸头端到端（需真实桌面，勿设 offscreen）
 python scripts/bench_im_polling.py      # 实机量化轮询开销（可选）

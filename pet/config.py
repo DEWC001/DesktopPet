@@ -130,6 +130,16 @@ QUIET_PRESETS = [
 # 专注模式时长预设（分钟）
 FOCUS_PRESETS = [30, 60, 120]
 
+# 番茄钟：经典 Pomodoro Technique。work → short_break → work → ... → long_break → work
+# 阶段切换时不弹系统通知（番茄钟是"温和"循环），仅在桌宠身上切表情 + 弹气泡。
+# 这与 1.2.0 专注模式完全独立：用户可以同时存在一个专注模式（任意时长静默）
+# 和一个番茄钟（循环阶段静默），统一通过 is_silent_now() 通道抑制提醒。
+POMODORO_PHASES = ("work", "short_break", "long_break")
+POMODORO_WORK_MIN = 25          # 单段工作时长
+POMODORO_SHORT_BREAK_MIN = 5    # 短休时长
+POMODORO_LONG_BREAK_MIN = 15    # 长休时长
+POMODORO_LONG_EVERY = 4         # 多少个 work 后进入长休
+
 # 贴边隐藏：静止超过 N 秒后自动贴边（默认 30s）
 EDGE_HIDE_IDLE_SECONDS = 30
 
@@ -548,6 +558,172 @@ def set_focus_minutes(mins: int) -> None:
     set_value("focus_until", 0 if mins <= 0 else time.time() + mins * 60)
 
 
+# ---------- 番茄钟（Pomodoro Timer）----------
+# 阶段切换时不弹系统通知（番茄钟是"温和"循环），仅在桌宠身上切表情 + 弹气泡。
+# 与 1.2.0 专注模式完全独立：用户可以同时存在一个专注模式（任意时长静默）
+# 和一个番茄钟（循环阶段静默），统一通过 is_silent_now() 通道抑制提醒。
+#
+# 运行状态全部持久化在 QSettings（与离开状态不同——番茄钟是用户主动启动的
+# 长任务，进程崩溃后应能从断点恢复，不要让用户重新开始）。
+#
+#   pomodoro_active: bool — 是否在跑
+#   pomodoro_phase: "work" / "short_break" / "long_break"
+#   pomodoro_round: int — 当前是第几个 work（1..POMODORO_LONG_EVERY）
+#   pomodoro_phase_end: float — 当前阶段结束时间戳（time.time()）
+#   pomodoro_phase_start: float — 当前阶段开始时间戳
+#   pomodoro_today_date: str — YYYY-MM-DD，今日计数归属日
+#   pomodoro_today_count: int — 今日已完成 work 数（番茄数）
+
+
+def _pomodoro_state():
+    """从 QSettings 读取番茄钟运行状态字段。返回 dict（不存在的字段返回空串/0）。"""
+    s = settings()
+    return {
+        "active": _flag("pomodoro_active"),
+        "phase": str(s.value("pomodoro_phase", "work") or "work"),
+        "round": s.value("pomodoro_round", 1),
+        "end": s.value("pomodoro_phase_end", 0),
+        "start": s.value("pomodoro_phase_start", 0),
+    }
+
+
+def pomodoro_active() -> bool:
+    """番茄钟是否在跑。"""
+    return _flag("pomodoro_active")
+
+
+def pomodoro_phase() -> str | None:
+    """当前阶段：work / short_break / long_break，未启动返回 None。"""
+    if not pomodoro_active():
+        return None
+    phase = str(_pomodoro_state()["phase"])
+    return phase if phase in POMODORO_PHASES else None
+
+
+def pomodoro_phase_end() -> float:
+    """当前阶段结束时间戳。"""
+    try:
+        return float(_pomodoro_state()["end"] or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pomodoro_round() -> int:
+    """当前是第几个 work（番茄数）。"""
+    try:
+        return max(1, int(_pomodoro_state()["round"] or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def pomodoro_phase_remaining() -> int:
+    """当前阶段剩余秒数。番茄钟未启动返回 0。"""
+    if not pomodoro_active():
+        return 0
+    end = pomodoro_phase_end()
+    if end <= 0:
+        return 0
+    left = end - time.time()
+    return max(0, int(left))
+
+
+def pomodoro_today_count() -> int:
+    """今日已完成番茄数（归属日变更时自动重置）。"""
+    s = settings()
+    today = time.strftime("%Y-%m-%d")
+    saved_date = str(s.value("pomodoro_today_date", "") or "")
+    if saved_date != today:
+        return 0
+    try:
+        return max(0, int(s.value("pomodoro_today_count", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _phase_minutes(phase: str) -> int:
+    return {
+        "work": POMODORO_WORK_MIN,
+        "short_break": POMODORO_SHORT_BREAK_MIN,
+        "long_break": POMODORO_LONG_BREAK_MIN,
+    }[phase]
+
+
+def _next_phase(current: str, round_num: int) -> str:
+    """work → break（按 round 决定短/长），break → work。"""
+    if current == "work":
+        return "long_break" if round_num >= POMODORO_LONG_EVERY else "short_break"
+    return "work"
+
+
+def start_pomodoro() -> None:
+    """启动番茄钟：从 work round 1 开始。已运行时 noop（避免重启阶段时间）。"""
+    if pomodoro_active():
+        return
+    s = settings()
+    now = time.time()
+    s.setValue("pomodoro_active", True)
+    s.setValue("pomodoro_phase", "work")
+    s.setValue("pomodoro_round", 1)
+    s.setValue("pomodoro_phase_end", now + POMODORO_WORK_MIN * 60)
+    s.setValue("pomodoro_phase_start", now)
+    s.sync()
+
+
+def stop_pomodoro() -> None:
+    """停止番茄钟（清阶段、关计时器，保留今日计数）。"""
+    s = settings()
+    s.setValue("pomodoro_active", False)
+    s.setValue("pomodoro_phase", "work")
+    s.setValue("pomodoro_phase_end", 0)
+    s.setValue("pomodoro_phase_start", 0)
+    s.sync()
+
+
+def pomodoro_tick() -> tuple | None:
+    """每秒调用：阶段结束则切换到下一阶段。
+
+    返回 (old_phase, new_phase, finished_work) 或 None。
+    finished_work = True 表示刚完成一个 work 阶段（番茄数 +1）。
+
+    关键：判断"下一阶段是 short 还是 long"必须用**完成前**的 round_num
+    （因为 round 1 完成 → 应该是 short_break，round 4 完成 → 才是 long_break）。
+    """
+    if not pomodoro_active():
+        return None
+    end = pomodoro_phase_end()
+    if end <= 0 or time.time() < end:
+        return None
+    s = settings()
+    old_phase = pomodoro_phase() or "work"
+    finished_work = old_phase == "work"
+    old_round = pomodoro_round()
+    if finished_work:
+        today = time.strftime("%Y-%m-%d")
+        saved_date = str(s.value("pomodoro_today_date", "") or "")
+        count = 0
+        if saved_date == today:
+            try:
+                count = max(0, int(s.value("pomodoro_today_count", 0) or 0))
+            except (TypeError, ValueError):
+                count = 0
+        s.setValue("pomodoro_today_date", today)
+        s.setValue("pomodoro_today_count", count + 1)
+        # 完成第 POMODORO_LONG_EVERY 个 work 后，下一轮 round 回到 1
+        if old_round >= POMODORO_LONG_EVERY:
+            s.setValue("pomodoro_round", 1)
+        else:
+            s.setValue("pomodoro_round", old_round + 1)
+    # 用"完成前"的 round_num 决定下一阶段（修复 round 时机错位）
+    new_phase = _next_phase(old_phase, old_round)
+    new_minutes = _phase_minutes(new_phase)
+    now = time.time()
+    s.setValue("pomodoro_phase", new_phase)
+    s.setValue("pomodoro_phase_end", now + new_minutes * 60)
+    s.setValue("pomodoro_phase_start", now)
+    s.sync()
+    return (old_phase, new_phase, finished_work)
+
+
 # 离开状态（锁屏）是纯内存标记：不写 QSettings，避免程序崩溃后残留
 # 「一直在离开中」导致提醒永远静默。每次启动自然是 False。
 _away = False
@@ -564,11 +740,11 @@ def is_away() -> bool:
 
 
 def is_silent_now() -> bool:
-    """当前是否静默：免打扰时段、专注模式、离开（锁屏）任一生效。
+    """当前是否静默：免打扰时段、专注模式、离开（锁屏）、番茄钟任一生效。
 
     静默期间提醒只弹气泡，不响铃、不跳跃、不跑到屏幕中心。
     """
-    return quiet_active() or focus_active() or is_away()
+    return quiet_active() or focus_active() or is_away() or pomodoro_active()
 
 
 def sound_allowed() -> bool:

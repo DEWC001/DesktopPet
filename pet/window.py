@@ -78,6 +78,8 @@ class PetWindow(QWidget):
         # 临时帧覆盖（笑/喝水等短暂动作）：_override_frame 为帧名，_override_until 为过期时间戳
         self._override_frame = None
         self._override_until = 0
+        # 番茄钟阶段表情：work → think，break → laugh，由 _on_pomodoro_tick 维护
+        self._pomodoro_frame = None
         # 双击抑制：Qt 双击序列为 press→release→dblclick→release，
         # 第二次 release 会再触发一次单击逻辑，需标记抑制，否则双击会多跳一次
         self._suppress_click = False
@@ -204,6 +206,13 @@ class PetWindow(QWidget):
         # 未读超时强提醒：app -> 单次 QTimer（持续未读超时后跑到屏幕中心）
         self._unread_timers = {}
 
+        # 番茄钟阶段切换：1s 周期轮询；阶段结束自动切下一阶段并弹气泡
+        # 番茄钟启动/停止由托盘菜单控制，这里只做"驱赶阶段切换"
+        self._pomodoro_timer = QTimer(self)
+        self._pomodoro_timer.setInterval(1000)
+        self._pomodoro_timer.timeout.connect(self._on_pomodoro_tick)
+        self._pomodoro_timer.start()
+
     # ---------- 素材 ----------
     def _load_all_frames(self) -> QPixmap:
         """加载当前皮肤的全部基础+扩展帧；缺失基础帧回退 idle，缺失扩展帧跳过。
@@ -301,7 +310,12 @@ class PetWindow(QWidget):
         # 1. 临时帧覆盖（如双击 laugh、喝水 drink），过期自动失效
         if self._override_frame and self._override_frame in self.frames:
             return self._override_frame
-        # 2. 状态映射
+        # 2. 番茄钟阶段表情：work → think（专注），break → laugh（开心）
+        # _pomodoro_frame 字段本身就是意图标记（由 start_pomodoro / stop_pomodoro 维护），
+        # 不需要再查 pomodoro_active()。这样测试时只设字段也能立刻生效
+        if self._pomodoro_frame and self._pomodoro_frame in self.frames:
+            return self._pomodoro_frame
+        # 3. 状态映射
         if self._jumping or self.brain.state == PetBrain.JUMP:
             return "jump"
         if self.brain.state == PetBrain.SLEEP:
@@ -1255,6 +1269,83 @@ class PetWindow(QWidget):
         self._bubble_timer.stop()
         if self.bubble is not None:
             self.bubble.hide()
+
+    # ---------- 番茄钟阶段切换 ----------
+    def _on_pomodoro_tick(self) -> None:
+        """1s 周期：检查番茄钟阶段是否结束，是则切换并通知用户。
+
+        阶段切换不弹系统通知——番茄钟是"温和"循环，仅在桌宠身上：
+        1. 切表情（work → think，break → laugh）
+        2. 弹气泡说"该休息啦" / "继续工作"
+        3. 表情通过 _pomodoro_frame 持续到阶段结束（不依赖 _override_until）
+
+        **同步保护**：tick 入口处若 _pomodoro_frame 为 None 而番茄钟已运行
+        （用户在另一进程改 QSettings 启动、或刚被切换但表达式没匹配等），
+        根据当前 phase 同步表情字段。避免窗口一直停在 idle 帧
+        """
+        if config.pomodoro_active() and not self._pomodoro_frame:
+            phase = config.pomodoro_phase()
+            if phase == "work":
+                self._pomodoro_frame = "think" if "think" in self.frames else None
+            elif phase in ("short_break", "long_break"):
+                self._pomodoro_frame = "laugh" if "laugh" in self.frames else None
+        result = config.pomodoro_tick()
+        if result is not None:
+            old_phase, new_phase, finished_work = result
+            # 表情：work 阶段严肃，break 阶段开心
+            if new_phase == "work":
+                self._pomodoro_frame = "think" if "think" in self.frames else None
+            else:
+                self._pomodoro_frame = "laugh" if "laugh" in self.frames else None
+            self._refresh_frame()
+            # 气泡台词
+            if new_phase == "work":
+                self._show_bubble("继续工作，专注 25 分钟～", 8000)
+            elif new_phase == "short_break":
+                self._show_bubble("该休息啦，伸个懒腰 5 分钟～", 8000)
+            else:  # long_break
+                self._show_bubble("完成一轮！来个长休 15 分钟～", 10000)
+            # 托盘菜单标题刷新（剩余时间变了）
+            if hasattr(self.tray, "_sync_focus_menu"):
+                self.tray._sync_focus_menu()
+            # 通知托盘刷新「今日完成：N」项
+            if hasattr(self.tray, "_sync_pomodoro_menu"):
+                self.tray._sync_pomodoro_menu()
+        # 每 60s 刷新一次菜单标题（避免显示"剩 25 分"卡了 24 分钟不变）
+        elif config.pomodoro_active() and hasattr(self, "_pomodoro_tick_count"):
+            self._pomodoro_tick_count += 1
+            if self._pomodoro_tick_count >= 60 and hasattr(self.tray, "_sync_focus_menu"):
+                self._pomodoro_tick_count = 0
+                self.tray._sync_focus_menu()
+        else:
+            self._pomodoro_tick_count = 0
+
+    def _refresh_frame(self) -> None:
+        """刷新当前帧（强制重新调 _on_breath）。"""
+        if hasattr(self, "_on_breath"):
+            self._on_breath()
+
+    def start_pomodoro(self) -> None:
+        """托盘入口：启动番茄钟（从 work round 1 开始）。"""
+        config.start_pomodoro()
+        self._pomodoro_frame = "think" if "think" in self.frames else None
+        self._refresh_frame()
+        self._show_bubble("番茄钟启动～ 工作中 25 分钟", 6000)
+        if hasattr(self.tray, "_sync_focus_menu"):
+            self.tray._sync_focus_menu()
+        if hasattr(self.tray, "_sync_pomodoro_menu"):
+            self.tray._sync_pomodoro_menu()
+
+    def stop_pomodoro(self) -> None:
+        """托盘入口：结束番茄钟。"""
+        config.stop_pomodoro()
+        self._pomodoro_frame = None
+        self._refresh_frame()
+        self._show_bubble("番茄钟结束～", 5000)
+        if hasattr(self.tray, "_sync_focus_menu"):
+            self.tray._sync_focus_menu()
+        if hasattr(self.tray, "_sync_pomodoro_menu"):
+            self.tray._sync_pomodoro_menu()
 
     def set_away_detect(self, enabled: bool) -> None:
         """托盘开关：启用/停用离开感知。"""

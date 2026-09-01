@@ -237,6 +237,21 @@ class TrayIcon(QSystemTrayIcon):
         act_focus_off.triggered.connect(lambda: self._on_focus(0))
         self.focus_menu.addAction(act_focus_off)
 
+        # 番茄钟子菜单（1.5.0）：循环 25+5（每 4 个 work 后长休 15）。
+        # 与专注模式并存：番茄钟是"循环阶段静默"，专注模式是"任意时长静默"，
+        # 都通过 is_silent_now() 通道抑制提醒，但用独立的状态机管理阶段。
+        self.pomodoro_menu = QMenu("番茄钟", self.menu)
+        self.act_pomodoro_start = QAction("启动经典 25+5", self.pomodoro_menu)
+        self.act_pomodoro_start.triggered.connect(self._on_pomodoro_start)
+        self.act_pomodoro_stop = QAction("结束番茄钟", self.pomodoro_menu)
+        self.act_pomodoro_stop.triggered.connect(self._on_pomodoro_stop)
+        self.pomodoro_menu.addAction(self.act_pomodoro_start)
+        self.pomodoro_menu.addAction(self.act_pomodoro_stop)
+        self.pomodoro_menu.addSeparator()
+        self.act_pomodoro_today = QAction("今日完成：0", self.pomodoro_menu)
+        self.act_pomodoro_today.setEnabled(False)
+        self.pomodoro_menu.addAction(self.act_pomodoro_today)
+
         # 免打扰时段子菜单（每天固定时段静默，支持跨零点）
         self.quiet_menu = QMenu("免打扰时段", self.menu)
         self.act_quiet_enabled = QAction("开启免打扰", self.quiet_menu)
@@ -278,6 +293,7 @@ class TrayIcon(QSystemTrayIcon):
         self.menu.addMenu(self.custom_menu)
         self.menu.addSeparator()
         self.menu.addMenu(self.focus_menu)
+        self.menu.addMenu(self.pomodoro_menu)
         self.menu.addMenu(self.quiet_menu)
         self.menu.addSeparator()
         self.menu.addMenu(self.size_menu)
@@ -295,6 +311,7 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_skin_checks()
         self._sync_quiet_checks()
         self._sync_focus_menu()
+        self._sync_pomodoro_menu()
         self._sync_custom_menu()
 
     # ---------- 图标 ----------
@@ -397,6 +414,7 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_skin_checks()
         self._sync_quiet_checks()
         self._sync_focus_menu()
+        self._sync_pomodoro_menu()
         self._sync_custom_menu()
 
     def _on_location(self, loc: str) -> None:
@@ -511,6 +529,29 @@ class TrayIcon(QSystemTrayIcon):
         config.set_focus_minutes(mins)
         self._sync_focus_menu()
 
+    # ---------- 番茄钟 ----------
+    def _on_pomodoro_start(self) -> None:
+        """启动番茄钟（从 work round 1 开始）。已运行时点这个就是 noop。"""
+        if config.pomodoro_active():
+            return
+        self.window.start_pomodoro()
+
+    def _on_pomodoro_stop(self) -> None:
+        if not config.pomodoro_active():
+            return
+        self.window.stop_pomodoro()
+
+    def _sync_pomodoro_menu(self) -> None:
+        """刷新番茄钟菜单状态：今日完成数 / 启动/结束按钮可用性。"""
+        try:
+            count = config.pomodoro_today_count()
+            self.act_pomodoro_today.setText(f"今日完成：{count}")
+            running = config.pomodoro_active()
+            self.act_pomodoro_start.setEnabled(not running)
+            self.act_pomodoro_stop.setEnabled(running)
+        except Exception:
+            pass
+
     def _on_quiet_enabled(self, checked: bool) -> None:
         config.set_value("quiet_enabled", checked)
         self._sync_quiet_checks()
@@ -552,7 +593,22 @@ class TrayIcon(QSystemTrayIcon):
             act.setChecked(s == start and e == end)
 
     def _sync_focus_menu(self) -> None:
-        """菜单标题显示专注剩余时间，用户不点进去也能看到状态。"""
+        """菜单标题显示专注 / 番茄钟剩余时间，用户不点进去也能看到状态。
+
+        优先级：番茄钟 > 专注模式 > 番茄菜单（独立项）。番茄钟期间显示
+        「🍅 工作中 剩 X」 / 「☕ 休息中 剩 X」，否则按专注模式状态显示。
+        """
+        if config.pomodoro_active():
+            phase = config.pomodoro_phase()
+            left = config.pomodoro_phase_remaining()
+            mins = max(0, left // 60)
+            if phase == "work":
+                self.focus_menu.setTitle(f"🍅 工作中 · 剩 {mins} 分")
+            elif phase == "short_break":
+                self.focus_menu.setTitle(f"☕ 休息中 · 剩 {mins} 分")
+            elif phase == "long_break":
+                self.focus_menu.setTitle(f"☕ 长休中 · 剩 {mins} 分")
+            return
         left = config.focus_remaining()
         if left <= 0:
             self.focus_menu.setTitle("专注模式")

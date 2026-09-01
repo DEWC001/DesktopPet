@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] - 2026-09-01
+
+> 新增**番茄钟**：经典 25+5 循环模式（每 4 个 work 后长休 15 分钟）。
+> 与已有的专注模式并存但独立——专注是任意时长静默，番茄是循环阶段静默。
+> 阶段切换时桌宠会切表情（work → think 严肃，break → laugh 开心）+ 弹气泡。
+
+### 新增
+
+- **番茄钟**（托盘「番茄钟」子菜单，默认关）：
+  - **启动经典 25+5**：从 work round 1 开始；work 25 min → short_break 5 min → work 25 min → ... → 第 4 个 work 后 → long_break 15 min → 回到 work round 1
+  - **结束番茄钟**：随时停止（保留今日完成数）
+  - **今日完成：N**：自动累加 work 阶段完成数，跨日自动归零
+  - 阶段切换不弹系统通知——仅在桌宠身上切表情 + 弹气泡（"该休息啦"/"继续工作"）
+  - 托盘菜单标题实时显示：🍅 工作中 · 剩 X 分 / ☕ 休息中 · 剩 X 分 / ☕ 长休中 · 剩 X 分
+- 状态持久化：番茄钟运行状态全部存 QSettings，进程崩溃后重启能从断点恢复
+
+### 设计
+
+- 番茄钟是**独立的静默通道**（不与专注模式 `focus_until` 互覆盖），统一通过 `is_silent_now()` 抑制提醒
+- `pomodoro_active()` 单独判断；`pomodoro_phase()` 返回 work/short_break/long_break/None
+- `_pomodoro_frame` 字段持续切表情（与 1.4.0 摸头的 `_override_frame` 临时覆盖分离，**持续到阶段结束**）
+- 阶段切换由 1s 周期 `pomodoro_timer` 驱动，每分钟刷一次托盘菜单标题
+
+### 踩过的坑
+
+- **`_pomodoro_frame` 外部启动不同步**：实机验证时通过 QSettings 直接设 `pomodoro_active=true`
+  触发番茄钟，**exe 的 1s tick 把阶段切对了**（work → short_break，今日完成数 +1），
+  **但桌宠一直停在 idle 帧**。根因：`_pomodoro_frame` 字段只由托盘入口 `start_pomodoro()` 设置，
+  外部启动番茄钟不会调到这个方法。修法：tick 入口处若 `_pomodoro_frame` 为 None
+  且 `pomodoro_active` 为 True，按当前 phase 同步设字段（work → think，break → laugh）
+- **QSettings 路径写错**：第一次真机验证用 `QSettings("DEWC001", "DesktopPet")` 改注册表，
+  桌宠自身是 `QSettings("DesktopPet", "DesktopPet")`（ORG=APP），路径错位 exe 看不到改动。
+  **QSettings(ORG, APP) 写入的是 `HKCU\Software\ORG\APP`，跨进程通信必须 ORG/APP 完全一致**
+- **round 计数时机错位**：`_next_phase()` 用"完成前"的 round 算下一阶段才是 short/long 决定点，
+  但当时我把 round 自增写在 `_next_phase()` 调用之前，结果 round 1 完成时 round 字段已变 2，
+  `_next_phase("work", 2) → short_break`；round 3 完成时 round 字段已变 4，
+  `_next_phase("work", 4) → long_break`——比预期早一轮进入长休。修法：先读 `old_round`，
+  算 `new_phase = _next_phase(old_phase, old_round)`，**再用 old_round 决定 round 字段更新**
+- **`start_pomodoro()` 没幂等**：第二次调用会重置阶段时间。已加 `if pomodoro_active(): return` 早返回
+- **`_current_frame_name()` 不该查 `pomodoro_active()`**：`_pomodoro_frame` 字段本身就是意图标记，
+  是否启用由 `start/stop_pomodoro()` 控制；判断两次导致测试要 mock config + 设字段才生效。
+  改成只看字段
+
+### 测试
+
+- 新增 `scripts/test_pomodoro.py`（14 项）：状态机/启动幂等/4 轮 work→long_break/长休回 round 1/
+  跨日计数归零/与 `is_silent_now()` 集成/窗口 `_pomodoro_frame` 切表情/`_current_frame_name` 优先级
+- 全量回归 **176 项全绿**（静默 43 + 菜单 29 + 行为 11 + IM 轮询 20 + 锁屏 24
+  + 摸头交互 25 + 番茄钟 14 + 摸头 e2e 5 + 锁屏 e2e 5）
+
 ## [1.4.0] - 2026-09-01
 
 > 新增**摸头互动**：鼠标移到宠物身上它会蹭你，来回抚摸会累计次数，
