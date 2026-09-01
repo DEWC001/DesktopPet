@@ -25,8 +25,10 @@ from . import config
 
 logger = logging.getLogger("im_unread")
 
-POLL_SECONDS = 2.0          # 轮询间隔（秒）
+POLL_SECONDS = 2.0          # 有受监测 IM 运行时的轮询间隔（秒）
+POLL_SECONDS_IDLE = 15.0    # 无受监测 IM 运行时的降频间隔（秒）
 HOLD_SECONDS = 10.0         # 未读信号消失后的保持时长（秒）：避免短暂闪烁被误判成已读
+TASKBAR_CACHE_SECONDS = 300.0  # 任务栏控件缓存时长（秒），超时或取不到按钮时强制重找
 
 # Name 角标正则：如「QQ (3)」表示 3 条未读
 _BADGE_RE = re.compile(r"\(\d+\)")
@@ -45,6 +47,11 @@ class ImUnreadWatcher(QObject):
         self._enabled_apps = {}  # app_name -> 关键词列表（主线程维护，引用替换）
         self._dump_counter = 0
         self._available = False
+        # 自适应降频：没有任何受监测 IM 在跑时降到 POLL_SECONDS_IDLE，
+        # 一旦检测到目标应用立即恢复 POLL_SECONDS（仅后台线程读写 _idle）
+        self._idle = False
+        self._taskbar = None       # 任务栏控件缓存（UIA 遍历开销大头）
+        self._taskbar_time = 0.0
         self._load_apps()
         self._init()
 
@@ -124,23 +131,80 @@ class ImUnreadWatcher(QObject):
                 self._poll(auto, silent=False)
             except Exception as e:
                 logger.warning("IM 未读监听轮询异常: %s", e)
-            self._stop.wait(POLL_SECONDS)
+            self._stop.wait(self._current_interval())
+
+    def _current_interval(self) -> float:
+        """当前轮询间隔：没有任何受监测 IM 运行时降频。"""
+        return POLL_SECONDS_IDLE if self._idle else POLL_SECONDS
+
+    def _set_idle(self, idle: bool) -> None:
+        """切换降频状态，只在变化时打日志，避免刷屏。"""
+        if idle == self._idle:
+            return
+        self._idle = idle
+        if idle:
+            logger.info(
+                "IM 未读监听降频：未发现受监测的 IM 运行（%.0fs → %.0fs）",
+                POLL_SECONDS, POLL_SECONDS_IDLE,
+            )
+        else:
+            logger.info("IM 未读监听恢复常速（%.0fs）", POLL_SECONDS)
+
+    def _get_taskbar(self, root, force: bool = False):
+        """取任务栏控件，带缓存。缓存超时或调用方强制时重新查找。"""
+        now = time.monotonic()
+        if (
+            not force
+            and self._taskbar is not None
+            and (now - self._taskbar_time) < TASKBAR_CACHE_SECONDS
+        ):
+            return self._taskbar
+        self._taskbar = self._find_taskbar(root)
+        self._taskbar_time = now
+        return self._taskbar
 
     def _poll(self, auto, silent: bool) -> None:
         root = auto.GetRootControl()
-        taskbar = self._find_taskbar(root)
-        if taskbar is None:
-            return
         buttons = []
-        self._collect_buttons(taskbar, buttons)
+        taskbar = self._get_taskbar(root)
+        if taskbar is not None:
+            try:
+                self._collect_buttons(taskbar, buttons)
+            except Exception as e:
+                logger.debug("任务栏按钮遍历失败，丢弃缓存: %s", e)
+                self._taskbar = None
+                buttons = []
+        if taskbar is not None and not buttons:
+            # 缓存的任务栏可能已失效（如资源管理器重启后旧控件静默返回空），
+            # 放弃缓存重找一次再试，避免长时间漏检未读
+            self._taskbar = None
+            taskbar = self._get_taskbar(root, force=True)
+            if taskbar is not None:
+                try:
+                    self._collect_buttons(taskbar, buttons)
+                except Exception as e:
+                    logger.debug("任务栏按钮遍历重试失败: %s", e)
+                    self._taskbar = None
+        if taskbar is None:
+            self._set_idle(True)
+            return
+
+        found_any = False    # 本轮是否发现任何受监测 IM 在运行
+        titles = None        # 顶层窗口标题，懒加载：一轮只枚举一次
 
         for app_name, keywords in list(self._enabled_apps.items()):
             btn = self._match_button(buttons, keywords)
+            if btn is not None:
+                found_any = True
             raw = self._is_unread(btn) if btn is not None else False
             # 兜底：任务栏按钮读不到未读时，枚举顶层窗口标题是否带未读角标
             #（多窗口合并时任务栏按钮名可能丢角标，如「QQ - 2 个运行窗口」）
             if not raw:
-                raw = self._window_title_unread(root, keywords)
+                if titles is None:
+                    titles = self._collect_window_titles(root)
+                if self._window_title_unread_from(titles, keywords):
+                    raw = True
+                    found_any = True
 
             # 未读保持（去抖）：检测到未读后，即使信号短暂消失也保持 HOLD 秒，
             # 防止「闪几下就停」的应用被误判成已读、导致超时强提醒被提前取消
@@ -154,6 +218,9 @@ class ImUnreadWatcher(QObject):
                 logger.info("IM 未读变化: %s -> %s", app_name, effective)
                 if not silent:
                     self.unread_changed.emit(app_name, effective)
+
+        # 一个受监测 IM 都没跑 → 降频；只要发现任何一个就立刻恢复常速
+        self._set_idle(not found_any)
 
         # 周期性 dump 任务栏按钮名，便于定位「QQ/微信/企微」的确切按钮名
         self._dump_counter += 1
@@ -195,12 +262,22 @@ class ImUnreadWatcher(QObject):
         except Exception:
             pass
         try:
-            for c in ctrl.GetChildren():
-                r = ImUnreadWatcher._find_taskbar(c, depth + 1)
-                if r is not None:
-                    return r
+            children = ctrl.GetChildren()
         except Exception:
-            pass
+            return None
+        # Shell_TrayWnd 通常是桌面的直接子节点：先只扫一层，命中就直接返回，
+        # 免掉「为了找任务栏而把每个顶层窗口的整棵子树都翻一遍」这个开销大头
+        if depth == 0:
+            for c in children:
+                try:
+                    if c.ClassName == "Shell_TrayWnd":
+                        return c
+                except Exception:
+                    pass
+        for c in children:
+            r = ImUnreadWatcher._find_taskbar(c, depth + 1)
+            if r is not None:
+                return r
         return None
 
     @staticmethod
@@ -241,27 +318,47 @@ class ImUnreadWatcher(QObject):
         return False
 
     @staticmethod
-    def _window_title_unread(root, keywords) -> bool:
-        """枚举顶层窗口，检测是否有匹配应用、且标题带未读角标的窗口（如「QQ (3)」）。
+    def _collect_window_titles(root):
+        """一次性收集所有顶层窗口标题。
 
-        任务栏按钮名在多窗口合并时可能丢失角标（如「QQ - 2 个运行窗口」），
-        而主窗口标题仍带角标，这里作为兜底信号。
+        每轮轮询只调一次，供所有受监测应用复用；改造前每个应用各枚举一遍，
+        4 个应用 = 每秒 2 轮 × 4 次全量顶层窗口遍历。
         """
+        titles = []
         try:
             windows = root.GetChildren()
         except Exception:
-            return False
+            return titles
         for w in windows:
             try:
                 title = w.Name or ""
             except Exception:
                 continue
+            if title:
+                titles.append(title)
+        return titles
+
+    @staticmethod
+    def _window_title_unread_from(titles, keywords) -> bool:
+        """在已收集的标题列表里找「匹配应用 且 带未读角标」的窗口。"""
+        for title in titles:
             if not _BADGE_RE.search(title):
                 continue
             for kw in keywords:
                 if ImUnreadWatcher._name_matches(title, kw):
                     return True
         return False
+
+    @staticmethod
+    def _window_title_unread(root, keywords) -> bool:
+        """枚举顶层窗口，检测是否有匹配应用、且标题带未读角标的窗口（如「QQ (3)」）。
+
+        任务栏按钮名在多窗口合并时可能丢失角标（如「QQ - 2 个运行窗口」），
+        而主窗口标题仍带角标，这里作为兜底信号。
+        """
+        return ImUnreadWatcher._window_title_unread_from(
+            ImUnreadWatcher._collect_window_titles(root), keywords
+        )
 
     @staticmethod
     def _is_unread(btn) -> bool:

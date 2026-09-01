@@ -65,6 +65,7 @@
 - 部分应用（如 QQ）会在任务栏按钮/窗口标题显示未读角标（如「QQ (3)」），一并识别；
 - 只判断「有没有未读」，拿不到未读数与消息内容（IM 不对外暴露）。
 - 需应用在任务栏有按钮（运行中）；若某应用不提醒，查看日志 `~/.desktop_pet/logs/pet.log` 的「任务栏按钮名快照」行确认其按钮名。
+- **自适应降频（1.2.1）**：有受监测 IM 在跑时 2 秒一轮；一个都没跑时自动降到 15 秒一轮，检测到应用启动立即恢复 2 秒。空闲时几乎不占 CPU，检测逻辑与结果完全不变。
 
 > 另保留「飞书系统通知」监听（轮询 Windows 通知中心，识别来源为「飞书」的 toast，可显示消息摘要「【飞书】张三：你好」）。注意：**灵犀**（飞书定制版）不弹系统通知，只能走上面的任务栏未读方式；该通知监听对标准飞书客户端有效。首次使用若未开启通知访问，请到 Windows「设置 → 系统 → 通知」确认已开启。
 
@@ -135,6 +136,8 @@ build.bat
 │   ├── test_silence.py          # 静默逻辑单测（43 项）：免打扰跨零点/专注/音效
 │   ├── test_menu_smoke.py       # 托盘菜单冒烟（27 项）：offscreen 真构造并遍历触发菜单
 │   ├── test_behavior_smoke.py   # 行为冒烟（11 项）：双击序列/贴边隐藏/计时独立/自定义提醒
+│   ├── test_im_polling.py       # IM 轮询自测（20 项）：降频状态机/任务栏缓存/检测等价性
+│   ├── bench_im_polling.py      # 实机量化 IM 轮询开销（优化前 vs 优化后）
 │   ├── gen_default_extras.py    # 基于 idle.png 合成 drink/think/laugh 扩展帧
 │   └── process_skins.py         # 批量抠图 + 对齐 + 缩放（依赖 rembg）
 ├── raw/                    # AI 原始图生图（开发用，不打进 exe）
@@ -149,6 +152,8 @@ build.bat
 python scripts/test_silence.py          # 43 项，纯逻辑
 python scripts/test_menu_smoke.py       # 27 项，真构造 TrayIcon
 python scripts/test_behavior_smoke.py   # 11 项，真构造 PetWindow + 鼠标事件
+python scripts/test_im_polling.py       # 20 项，IM 轮询降频与检测等价性
+python scripts/bench_im_polling.py      # 实机量化轮询开销（可选）
 ```
 
 > 这三个测试存在的理由：1.2.0 曾出现 `config.get() takes 1 positional
