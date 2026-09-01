@@ -72,6 +72,14 @@ class ImUnreadWatcher(QObject):
         """重读配置（托盘切换开关后调用）。"""
         self._load_apps()
 
+    def monitored_apps(self) -> list:
+        """当前受监测的应用名列表（主线程调用）。"""
+        return list(self._enabled_apps.keys())
+
+    def unread_apps(self) -> list:
+        """当前仍未读的应用名列表（主线程调用）。"""
+        return [app for app in self._enabled_apps if self.is_unread(app)]
+
     # ---------- 启动 / 停止 ----------
     def _init(self) -> None:
         if not bool(config.get("feishu_enabled")):

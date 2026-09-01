@@ -105,6 +105,8 @@ DEFAULTS = {
     "focus_until": 0,
     # 贴边隐藏：静止多少秒后滑到屏幕边缘只露一角，鼠标靠近再滑回来
     "edge_hide_enabled": True,
+    # 离开感知：锁屏/离开时自动静默，回来补报（Windows 会话通知，零轮询开销）
+    "away_detect_enabled": True,
 }
 
 # 免打扰时段预设（显示名, 开始, 结束）
@@ -472,12 +474,27 @@ def set_focus_minutes(mins: int) -> None:
     set_value("focus_until", 0 if mins <= 0 else time.time() + mins * 60)
 
 
+# 离开状态（锁屏）是纯内存标记：不写 QSettings，避免程序崩溃后残留
+# 「一直在离开中」导致提醒永远静默。每次启动自然是 False。
+_away = False
+
+
+def set_away(value: bool) -> None:
+    """标记用户是否离开（锁屏）。仅内存，不持久化。"""
+    global _away
+    _away = bool(value)
+
+
+def is_away() -> bool:
+    return _away
+
+
 def is_silent_now() -> bool:
-    """当前是否静默：免打扰时段或专注模式任一生效。
+    """当前是否静默：免打扰时段、专注模式、离开（锁屏）任一生效。
 
     静默期间提醒只弹气泡，不响铃、不跳跃、不跑到屏幕中心。
     """
-    return quiet_active() or focus_active()
+    return quiet_active() or focus_active() or is_away()
 
 
 def sound_allowed() -> bool:

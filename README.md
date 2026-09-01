@@ -25,6 +25,28 @@
 
 「免打扰时段」与「专注模式」可叠加使用（任一生效即静默）。
 
+### 离开感知（1.3.0）
+
+人不在电脑前时，桌宠不该继续空转提醒。开启后（托盘「离开时静默」，默认开）：
+
+- **离开时**（Win+L 锁屏、屏保、休眠唤醒）：自动静默——不响铃、不跳跃、不跑到屏幕中心、不弹气泡，并暂停久坐计时（避免离开两小时后一回来就催你起身）。
+- **回来时**：解锁后弹一条汇总（离开 ≥1 分钟才报，快速锁一下屏不打扰）：
+
+  ```
+  欢迎回来～你离开了 1 小时 30 分钟
+  灵犀、微信 有未读消息；错过提醒：该吃药了、取快递
+  ```
+
+离开期间的消息按性质分类处理：
+
+| 类型 | 离开期间 | 回来后 |
+| --- | --- | --- |
+| 自定义提醒事项（吃药/周会/取快递） | 记下来 | **补报**（超过 5 条折叠为「… 等 N 条」） |
+| 周期提醒（喝水/久坐/整点/下班） | 丢弃 | 重新计时，不补报 |
+| IM 未读 | 不逐条打扰 | 统一汇报哪些应用有未读 |
+
+实现走 Windows 会话通知（`WTSRegisterSessionNotification` + `WM_WTSSESSION_CHANGE`），由系统主动推送，**零轮询开销**。离线、远程桌面断开等切换会话的场景同样适用。
+
 ### 贴边隐藏（1.2.0）
 
 桌宠静止超过 30 秒自动滑到边缘只露 20px（一角，避免长时间遮挡工作窗口）。鼠标移近（窗口周围 30px 内）自动滑回原位。托盘「贴边隐藏」勾选项可关闭。
@@ -137,6 +159,8 @@ build.bat
 │   ├── test_menu_smoke.py       # 托盘菜单冒烟（27 项）：offscreen 真构造并遍历触发菜单
 │   ├── test_behavior_smoke.py   # 行为冒烟（11 项）：双击序列/贴边隐藏/计时独立/自定义提醒
 │   ├── test_im_polling.py       # IM 轮询自测（20 项）：降频状态机/任务栏缓存/检测等价性
+│   ├── test_session_monitor.py  # 锁屏感知自测（24 项）：消息解析/离开静默/补报文案
+│   ├── test_session_e2e.py      # 锁屏端到端（5 项）：真窗口 + SendMessage 投递会话消息
 │   ├── bench_im_polling.py      # 实机量化 IM 轮询开销（优化前 vs 优化后）
 │   ├── gen_default_extras.py    # 基于 idle.png 合成 drink/think/laugh 扩展帧
 │   └── process_skins.py         # 批量抠图 + 对齐 + 缩放（依赖 rembg）
@@ -153,6 +177,8 @@ python scripts/test_silence.py          # 43 项，纯逻辑
 python scripts/test_menu_smoke.py       # 27 项，真构造 TrayIcon
 python scripts/test_behavior_smoke.py   # 11 项，真构造 PetWindow + 鼠标事件
 python scripts/test_im_polling.py       # 20 项，IM 轮询降频与检测等价性
+python scripts/test_session_monitor.py  # 24 项，锁屏感知（offscreen）
+python scripts/test_session_e2e.py      # 5 项，锁屏端到端（需真实桌面，勿设 offscreen）
 python scripts/bench_im_polling.py      # 实机量化轮询开销（可选）
 ```
 

@@ -1,5 +1,6 @@
 """透明置顶窗口 + 拖拽 + 点击反馈 + 多帧精灵图动画。"""
 import datetime
+import logging
 import math
 import os
 import random
@@ -10,11 +11,14 @@ from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from . import config
+from . import session_monitor
 from .animation import jump_animation
 from .brain import PetBrain
 from .notification_listener import NotificationWatcher
 from .im_unread_watcher import ImUnreadWatcher
 from .speech_bubble import SpeechBubble
+
+logger = logging.getLogger("pet")
 
 FRAME_NAMES = ["idle", "blink", "walk_a", "walk_b", "jump", "sleep"]
 # 扩展动作帧（皮肤目录里存在则加载，不存在则回退 idle）
@@ -77,6 +81,11 @@ class PetWindow(QWidget):
         self._edge_anim = None
         # 动作台词冷却：{state: last_emit_time}，避免切换刷屏
         self._last_action_quote_at: dict[str, float] = {}
+        # 离开感知（锁屏）：会话通知只在 HWND 创建后才能注册，放 showEvent 里做
+        self._session_registered = False
+        self._away = False
+        self._away_since = None
+        self._missed_custom: list[str] = []
         self.bubble = None
         self.tray = None
 
@@ -637,6 +646,10 @@ class PetWindow(QWidget):
 
     def remind_drink(self) -> None:
         """到点提醒：随机提示词 + 音效 + 跳跃 + 气泡，按位置模式决定是否跑到屏幕中心。"""
+        if self._away:
+            # 周期提醒离开期间丢弃，回来后按间隔重新计时即可，不必补报
+            self._setup_drink_timer()
+            return
         msg = random.choice(config.get_drink_messages())
         self._play_sound("drink.wav")
         was = self._begin_reminder()
@@ -747,6 +760,9 @@ class PetWindow(QWidget):
             self.hourly_timer.stop()
 
     def remind_hourly(self) -> None:
+        if self._away:
+            self._setup_hourly_timer()
+            return
         h = datetime.datetime.now().hour
         msg = random.choice(config.get_hourly_messages()).format(h=h)
         was = self._begin_reminder()
@@ -763,6 +779,9 @@ class PetWindow(QWidget):
             self.sit_timer.stop()
 
     def remind_sit(self) -> None:
+        if self._away:
+            self._setup_sit_timer()
+            return
         was = self._begin_reminder()
         self._notify(random.choice(config.get_sit_messages()))
         self._end_reminder(was)
@@ -785,6 +804,9 @@ class PetWindow(QWidget):
             self.offwork_timer.stop()
 
     def remind_offwork(self) -> None:
+        if self._away:
+            self._setup_offwork_timer()
+            return
         was = self._begin_reminder()
         self._notify(random.choice(config.get_offwork_messages()), duration=12000)
         self._end_reminder(was, delay=14000)
@@ -828,6 +850,10 @@ class PetWindow(QWidget):
 
     def _on_custom_reminder(self, item: dict) -> None:
         """自定义事项到点提醒（静默时自动不响铃不跳跃，只留气泡）。"""
+        if self._away:
+            # 自定义提醒有时效性（吃药/周会/取快递），记下来等回来补报
+            self._missed_custom.append(str(item.get("label") or "时间到啦"))
+            return
         was = self._begin_reminder()
         self._play_sound("msg.wav")
         self._notify(str(item.get("label") or "时间到啦"), duration=12000)
@@ -862,6 +888,8 @@ class PetWindow(QWidget):
     # ---------- 飞书新消息提醒 ----------
     def _on_feishu_message(self, sender: str, content: str) -> None:
         """收到飞书新消息：唤醒 + 跳一下 + 气泡显示摘要 + 提示音。"""
+        if self._away:
+            return  # 回来时由未读汇总统一补报，不逐条打扰
         was = self._begin_reminder()
         self._play_sound("msg.wav")
         if sender == "飞书":
@@ -877,6 +905,10 @@ class PetWindow(QWidget):
         IM 不对外暴露消息内容，只能得到「有未读」信号，气泡为通用提示。
         """
         if unread:
+            if self._away:
+                # 离开期间不逐条打扰，回来由未读汇总统一补报
+                self._start_unread_timer(app)
+                return
             was = self._begin_reminder()
             self._play_sound("msg.wav")
             self._notify(f"【{app}】有新消息，快去看看吧", duration=8000)
@@ -906,6 +938,10 @@ class PetWindow(QWidget):
         self._unread_timers.pop(app, None)
         if not self.im_watcher.is_unread(app):
             return  # 已经读过了，不再提醒
+        if self._away:
+            # 离开期间不跑到屏幕中心，继续排队等回来
+            self._start_unread_timer(app)
+            return
         was = self._begin_reminder()
         self._play_sound("msg.wav")
         tip = f"【{app}】消息还没看，快回来看看！"
@@ -922,6 +958,118 @@ class PetWindow(QWidget):
         self._end_reminder(was, delay=14000)
         self._start_unread_timer(app)
 
+    # ---------- 离开感知（锁屏 / 解锁） ----------
+    def showEvent(self, e) -> None:
+        """窗口显示后注册会话通知：HWND 此刻才有效。"""
+        super().showEvent(e)
+        if not self._session_registered:
+            self._session_registered = True
+            self._setup_session_monitor()
+
+    def _setup_session_monitor(self) -> None:
+        """注册锁屏/解锁通知。失败只记日志，不影响其它功能。"""
+        if not config.flag("away_detect_enabled"):
+            return
+        if session_monitor.register(int(self.winId())):
+            logger.info("离开感知已启用（锁屏时自动静默，回来补报）")
+        else:
+            logger.warning("离开感知注册失败，锁屏检测不可用")
+
+    def _teardown_session_monitor(self) -> None:
+        session_monitor.unregister(int(self.winId()))
+        self._session_registered = False
+
+    def nativeEvent(self, eventType, message):
+        """接收 Windows 原生消息，只处理会话变更（锁屏/解锁）。"""
+        kind = session_monitor.parse_message(message)
+        if kind == "lock":
+            self._on_session_lock()
+        elif kind == "unlock":
+            self._on_session_unlock()
+        return super().nativeEvent(eventType, message)
+
+    def _on_session_lock(self) -> None:
+        """锁屏 / 离开：进入静默，暂停久坐计时，清空上一轮补报记录。"""
+        if self._away:
+            return
+        self._away = True
+        self._away_since = time.time()
+        self._missed_custom.clear()
+        config.set_away(True)
+        # 久坐计时在离开期间没有意义：暂停，回来重新计时
+        #（否则离开两小时后一回来就立刻弹「该起身了」）
+        self.sit_timer.stop()
+        self._hide_bubble_now()
+        logger.info("检测到离开（锁屏），桌宠进入静默")
+
+    def _on_session_unlock(self) -> None:
+        """解锁 / 回来：恢复计时，汇总补报离开期间错过的事。"""
+        if not self._away:
+            return
+        self._away = False
+        config.set_away(False)
+        away_sec = time.time() - (self._away_since or time.time())
+        self._away_since = None
+        self._setup_sit_timer()  # 久坐计时重新开始
+        logger.info("检测到回来（解锁），离开 %.0f 秒", away_sec)
+        report = self._build_welcome_back(away_sec)
+        if report:
+            was = self._begin_reminder()
+            self._notify(report, duration=15000)
+            self._end_reminder(was, delay=16000)
+
+    def _build_welcome_back(self, away_sec: float) -> str:
+        """拼「欢迎回来」补报文案；离开太短或没内容就不打扰。"""
+        if away_sec < 60:
+            return ""  # 只是快速锁一下屏，不打扰
+        mins = int(away_sec // 60)
+        if mins < 60:
+            head = f"欢迎回来～你离开了 {mins} 分钟"
+        else:
+            head = f"欢迎回来～你离开了 {mins // 60} 小时 {mins % 60} 分钟"
+
+        lines = []
+        try:
+            pending = self.im_watcher.unread_apps()
+            if pending:
+                lines.append("、".join(pending) + " 有未读消息")
+        except Exception:  # noqa: BLE001
+            pass
+        if self._missed_custom:
+            shown = self._missed_custom[:5]
+            more = len(self._missed_custom) - len(shown)
+            tail = f" 等 {len(self._missed_custom)} 条" if more > 0 else ""
+            lines.append("错过提醒：" + "、".join(shown) + tail)
+        self._missed_custom.clear()
+
+        if not lines:
+            return head
+        return head + "\n" + "；".join(lines)
+
+    def _hide_bubble_now(self) -> None:
+        """立即收起气泡（离开时避免留一个过期气泡在桌面）。"""
+        self._bubble_timer.stop()
+        if self.bubble is not None:
+            self.bubble.hide()
+
+    def set_away_detect(self, enabled: bool) -> None:
+        """托盘开关：启用/停用离开感知。"""
+        config.set_value("away_detect_enabled", bool(enabled))
+        if enabled:
+            self._setup_session_monitor()
+        else:
+            self._teardown_session_monitor()
+            if self._away:  # 关掉功能时若正处在离开态，立刻恢复正常
+                self._away = False
+                self._away_since = None
+                self._missed_custom.clear()
+                config.set_away(False)
+                self._setup_sit_timer()
+
     def closeEvent(self, e):
         self._save_pos()
+        try:
+            self._teardown_session_monitor()
+        except Exception:  # noqa: BLE001
+            pass
         super().closeEvent(e)

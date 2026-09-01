@@ -48,6 +48,13 @@ class TrayIcon(QSystemTrayIcon):
         self.act_edge_hide.setChecked(config.flag("edge_hide_enabled"))
         self.act_edge_hide.toggled.connect(self._on_edge_hide)
 
+        # 离开感知（锁屏时自动静默，回来补报未读与错过的提醒）
+        self.act_away = QAction("离开时静默", self.menu)
+        self.act_away.setCheckable(True)
+        self.act_away.setToolTip("锁屏/离开时自动静默，回来补报未读消息与错过的提醒事项")
+        self.act_away.setChecked(config.flag("away_detect_enabled"))
+        self.act_away.toggled.connect(self._on_away_detect)
+
         # 喝水提醒子菜单
         self.drink_menu = QMenu("喝水提醒", self.menu)
         self.act_drink_enabled = QAction("开启提醒", self.drink_menu)
@@ -372,6 +379,7 @@ class TrayIcon(QSystemTrayIcon):
             act.setChecked(bool(config.get_im_enabled(app_name)))
         self.act_sound.setChecked(config.sound_enabled())
         self.act_edge_hide.setChecked(config.flag("edge_hide_enabled"))
+        self.act_away.setChecked(config.flag("away_detect_enabled"))
         self._sync_interval_checks()
         self._sync_size_checks()
         self._sync_sit_interval_checks()
@@ -480,6 +488,10 @@ class TrayIcon(QSystemTrayIcon):
             self.window._setup_edge_hide_timer()
         else:
             self.window._disable_edge_hide()
+
+    def _on_away_detect(self, checked: bool) -> None:
+        """离开感知开关：注册/注销 Windows 会话通知。"""
+        self.window.set_away_detect(checked)
 
     def _on_focus(self, mins: int) -> None:
         """开启专注模式若干分钟；0 表示立即结束专注。"""
