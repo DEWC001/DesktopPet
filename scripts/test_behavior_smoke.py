@@ -19,6 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import datetime  # noqa: E402
+import random  # noqa: E402
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
@@ -471,6 +472,133 @@ def main() -> int:
             config.sound_allowed = old_allowed
 
     check("静默时 _play_sound 安全返回", t_sound)
+
+    print("[11] 需求：皮肤专属语音（feidudu.wav 点击即播 / 活动随机播）")
+
+    # 语音播放断言套路：winsound.PlaySound 打桩计数（避免测试真出声），
+    # 并打桩 config.sound_allowed —— 注册表里提示音可能被关过，直接走桩保证链路。
+    import winsound as _ws
+
+    _orig_allowed = config.sound_allowed
+    _orig_skin_v = config.current_skin()
+    _orig_rnd = random.random
+
+    def patch_playsound():
+        calls = []
+        orig_ps = _ws.PlaySound
+        _ws.PlaySound = lambda path, flags: calls.append(path)
+        return calls, orig_ps
+
+    def wav_count(calls, name):
+        """桩里记录的是完整路径，按文件名后缀统计。"""
+        return sum(1 for c in calls if c.endswith(name))
+
+    def set_voice_skin(name):
+        config.set_value("skin", name)
+
+    def t_voice_file_default():
+        set_voice_skin("default")
+        assert_true(window._skin_voice_wav() is None, "default 皮肤不应有专属语音文件")
+
+    check("default 皮肤无语音文件", t_voice_file_default)
+
+    def t_voice_file_feidudu():
+        set_voice_skin("feidudu")
+        assert_true(window._skin_voice_wav() == "feidudu.wav", "feidudu 皮肤应命中语音文件")
+
+    check("feidudu 皮肤命中语音文件", t_voice_file_feidudu)
+
+    def t_click_plays():
+        set_voice_skin("feidudu")
+        calls, orig_ps = patch_playsound()
+        config.sound_allowed = lambda: True
+        try:
+            window._suppress_click = False
+            window._do_single_click()
+            assert_true(
+                wav_count(calls, "feidudu.wav") == 1,
+                f"单击应播放 feidudu.wav 一次，实际 {calls}",
+            )
+            window._do_double_click()
+            assert_true(
+                wav_count(calls, "feidudu.wav") == 2,
+                f"单击+双击应共播放 2 次，实际 {calls}",
+            )
+        finally:
+            _ws.PlaySound = orig_ps
+            config.sound_allowed = _orig_allowed
+
+    check("单击/双击点击即播语音", t_click_plays)
+
+    def t_default_skin_silent():
+        set_voice_skin("default")
+        calls, orig_ps = patch_playsound()
+        config.sound_allowed = lambda: True
+        try:
+            window._do_single_click()
+            window._do_double_click()
+            assert_true(len(calls) == 0, f"default 皮肤点击不应出声，实际 {calls}")
+        finally:
+            _ws.PlaySound = orig_ps
+            config.sound_allowed = _orig_allowed
+
+    check("非 feidudu 皮肤点击不出声", t_default_skin_silent)
+
+    def t_activity_random():
+        set_voice_skin("feidudu")
+        calls, orig_ps = patch_playsound()
+        config.sound_allowed = lambda: True
+        try:
+            window._last_skin_voice_at = 0.0
+            # 概率不中（0.9 ≥ 0.2）→ 不播
+            random.random = lambda: 0.9
+            window._maybe_play_skin_voice()
+            assert_true(len(calls) == 0, f"概率未命中不应播，实际 {calls}")
+            # 概率命中（0.1 < 0.2）→ 播 1 次
+            random.random = lambda: 0.1
+            window._maybe_play_skin_voice()
+            assert_true(wav_count(calls, "feidudu.wav") == 1, f"概率命中应播 1 次，实际 {calls}")
+            # 15s 冷却内不重播（last 刚被置为 now）
+            window._maybe_play_skin_voice()
+            assert_true(wav_count(calls, "feidudu.wav") == 1, f"冷却内不应重播，实际 {calls}")
+            # 冷却过期后可再播
+            window._last_skin_voice_at = time.time() - 16.0
+            window._maybe_play_skin_voice()
+            assert_true(wav_count(calls, "feidudu.wav") == 2, f"冷却过期应可再播，实际 {calls}")
+        finally:
+            _ws.PlaySound = orig_ps
+            config.sound_allowed = _orig_allowed
+            random.random = _orig_rnd
+
+    check("活动随机：概率+冷却", t_activity_random)
+
+    def t_state_enter_triggers():
+        """进入 WALK/JUMP/CHAT/WANDER 任一动作用来触发随机语音（集成路径）。"""
+        set_voice_skin("feidudu")
+        calls, orig_ps = patch_playsound()
+        config.sound_allowed = lambda: True
+        random.random = lambda: 0.1
+        try:
+            window._last_skin_voice_at = 0.0
+            window._prev_brain_state = window.brain.state
+            window._edge_state = "normal"  # 复位：前面用例可能残留 hidden
+            window.brain.poke()  # 回到待机，避免睡眠守卫干扰
+            window._on_state(PetBrain.CHAT)
+            assert_true(wav_count(calls, "feidudu.wav") == 1, f"进入 CHAT 应触发语音，实际 {calls}")
+            window._last_skin_voice_at = 0.0
+            window._on_state(PetBrain.SLEEP)
+            assert_true(wav_count(calls, "feidudu.wav") == 1, "SLEEP 不是活动，不应播语音")
+            window.brain.wake()
+        finally:
+            _ws.PlaySound = orig_ps
+            config.sound_allowed = _orig_allowed
+            random.random = _orig_rnd
+            set_voice_skin(_orig_skin_v)
+            window._edge_state = "normal"
+            window._sleep_side = False
+            window._slide_anim = None
+
+    check("进入活动动作触发随机语音", t_state_enter_triggers)
 
     print()
     print(f"结果：{PASS} 通过 / {FAIL} 失败")

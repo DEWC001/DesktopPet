@@ -38,6 +38,11 @@ BREATH_SCALES = [round(0.96 + 0.004 * i, 4) for i in range(21)]
 class PetWindow(QWidget):
     DISPLAY_H = 260  # 精灵帧统一高度（px）
 
+    # 皮肤专属语音（1.7.1）：语音文件放 assets/sounds/{皮肤名}.wav。
+    # 点击 100% 播；自发活动按概率随机播，且冷却期内不重复（防连续动作吵人）
+    SKIN_VOICE_PROB = 0.2       # 每次自发活动动作的出声概率
+    SKIN_VOICE_COOLDOWN = 15.0  # 活动随机出声的最小间隔（秒）
+
     def __init__(self):
         super().__init__()
         self.setWindowFlags(
@@ -102,6 +107,8 @@ class PetWindow(QWidget):
         self._activity = config.activity()
         # 动作台词冷却：{state: last_emit_time}，避免切换刷屏
         self._last_action_quote_at: dict[str, float] = {}
+        # 皮肤专属语音上次出声时间（活动随机出声冷却用，1.7.1）
+        self._last_skin_voice_at = 0.0
         # 离开感知（锁屏）：会话通知只在 HWND 创建后才能注册，放 showEvent 里做
         self._session_registered = False
         self._away = False
@@ -437,6 +444,9 @@ class PetWindow(QWidget):
                 self._wander()
 
         self._blinking = s == PetBrain.SLEEP
+        # 1.7.1：自发活动（走/跳/说话/散步）开始时按概率随机播皮肤语音
+        if not hidden and s in (PetBrain.WALK, PetBrain.JUMP, PetBrain.CHAT, PetBrain.WANDER):
+            self._maybe_play_skin_voice()
         # 切换动作时按冷却弹台词气泡（收缝里不弹，避免气泡从缝里冒出来）
         if not hidden:
             self._emit_action_quote(s)
@@ -568,6 +578,7 @@ class PetWindow(QWidget):
 
     def _do_single_click(self) -> None:
         self._do_jump(interactive=True)
+        self._play_skin_voice()  # 1.7.1：点击播皮肤专属语音（feidudu）
         if random.random() < 0.5:
             self._say(config.get_click_messages())
 
@@ -586,6 +597,7 @@ class PetWindow(QWidget):
             self._override_frame = "laugh"
             self._override_until = time.time() * 1000 + 1500
         self._do_jump(interactive=True)
+        self._play_skin_voice()  # 1.7.1：双击也播皮肤专属语音
         self._say(config.get_happy_messages())
 
     def _say(self, messages) -> None:
@@ -823,6 +835,45 @@ class PetWindow(QWidget):
                 winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         except Exception:
             pass
+
+    # ---------- 皮肤专属语音（1.7.1） ----------
+    def _skin_voice_wav(self) -> str | None:
+        """当前皮肤有没有专属语音文件：有则返回 wav 名，无则 None。
+
+        语音约定：assets/sounds/{皮肤名}.wav，如 feidudu → feidudu.wav。
+        default 皮肤或文件缺失返回 None（安静）。
+        """
+        skin = config.current_skin()
+        if skin == "default":
+            return None
+        wav = f"{skin}.wav"
+        return wav if os.path.exists(config.resource_path("sounds", wav)) else None
+
+    def _play_skin_voice(self) -> None:
+        """点击宠物时播皮肤专属语音（100% 播，不受活动冷却限制）。
+
+        静默（免打扰/专注/关闭提示音）时仍由 _play_sound 统一把关不响。
+        """
+        wav = self._skin_voice_wav()
+        if wav:
+            self._play_sound(wav)
+
+    def _maybe_play_skin_voice(self) -> None:
+        """自发活动（走/跳/说话/散步）时按概率随机播皮肤语音。
+
+        约 20% 概率出声、15 秒内不重复，避免活动频繁时语音连成噪音。
+        点击触发的播放走 _play_skin_voice，不受这里限制。
+        """
+        wav = self._skin_voice_wav()
+        if not wav:
+            return
+        now = time.time()
+        if now - self._last_skin_voice_at < self.SKIN_VOICE_COOLDOWN:
+            return
+        if random.random() >= self.SKIN_VOICE_PROB:
+            return
+        self._last_skin_voice_at = now
+        self._play_sound(wav)
 
     def _move_back(self, pos) -> None:
         anim = QPropertyAnimation(self, b"pos", self)
