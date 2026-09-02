@@ -107,6 +107,9 @@ DEFAULTS = {
     "edge_hide_enabled": True,
     # 离开感知：锁屏/离开时自动静默，回来补报（Windows 会话通知，零轮询开销）
     "away_detect_enabled": True,
+    # 活跃度 0-100（默认 50）：越低越爱睡觉、动作越轻柔；越高睡得越少、活动越频繁。
+    # 同时联动活动强度（跳跃高度/散步速度），50 时与旧版行为完全一致。
+    "activity": 50,
 }
 
 # 免打扰时段预设（显示名, 开始, 结束）
@@ -438,6 +441,14 @@ def _flag(key: str) -> bool:
 def flag(key: str) -> bool:
     """公开布尔读取入口（_flag 的同义别名，供 UI 层使用）。"""
     return _flag(key)
+
+
+def activity() -> int:
+    """当前活跃度 0-100（默认 50），越界值钳制到合法范围。"""
+    try:
+        return max(0, min(100, int(get("activity", 50))))
+    except (TypeError, ValueError):
+        return 50
 
 
 def _parse_hm(text):

@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     QTimer,
     QVariantAnimation,
 )
-from PySide6.QtGui import QCursor, QImage, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from . import config
@@ -84,13 +84,22 @@ class PetWindow(QWidget):
         # 第二次 release 会再触发一次单击逻辑，需标记抑制，否则双击会多跳一次
         self._suppress_click = False
         # 贴边隐藏：normal → hiding → hidden → showing → normal
-        # 静止 N 秒后滑到最近边缘只露一角，鼠标靠近再滑回 _last_user_pos
+        # 静止 N 秒后滑到最近边缘只露一角；隐藏后只有手动点击或提醒才滑回
+        #（1.7.0 起不再因鼠标靠近自动弹出）
         self._edge_state = "normal"
         self._last_move_time = time.time()
         self._last_user_pos = self.pos()
         self._edge_hide_idle_timer: QTimer = None
-        self._edge_hide_check_timer: QTimer = None
         self._edge_anim = None
+        # 睡眠靠边（1.7.0）：入睡时若处于普通位置，滑到最近屏幕边缘完整可见地睡；
+        # _sleep_side 标记"睡着靠边"中，唤醒后睡在哪醒在哪（不回位，用户选择）
+        self._sleep_side = False
+        self._slide_anim = None
+        # 上一个 brain 状态（_on_state 触发时 state 已是新值，靠它判断"刚睡醒"）
+        self._prev_brain_state = None
+        # 活跃度缓存（托盘改动后经 refresh_activity() 刷新）：逐帧散步步速/跳跃
+        # 高度用它，避免每个 33ms tick 都去读 QSettings（registry 读取开销）
+        self._activity = config.activity()
         # 动作台词冷却：{state: last_emit_time}，避免切换刷屏
         self._last_action_quote_at: dict[str, float] = {}
         # 离开感知（锁屏）：会话通知只在 HWND 创建后才能注册，放 showEvent 里做
@@ -362,12 +371,20 @@ class PetWindow(QWidget):
     def _toggle_walk_frame(self) -> None:
         self._walk_frame = "walk_b" if self._walk_frame == "walk_a" else "walk_a"
 
+    def _walk_step(self) -> int:
+        """散步步速（px/帧）：低活跃 1px，默认 50 活跃 2px，高活跃 3px。"""
+        v = PetBrain._scale(self._activity, 1.0, 2.0, 3.0)
+        if v < 1.5:
+            return 1
+        return 2 if v < 2.5 else 3
+
     def _on_walk(self) -> None:
         screen = QApplication.primaryScreen().availableGeometry()
-        x = self.x() + self._walk_dir * 2
+        step = self._walk_step()
+        x = self.x() + self._walk_dir * step
         if x < screen.left() or x + self.width() > screen.right():
             self._walk_dir *= -1
-            x = self.x() + self._walk_dir * 2
+            x = self.x() + self._walk_dir * step
         self.move(x, self.y())
         self._mark_movement()
 
@@ -376,21 +393,53 @@ class PetWindow(QWidget):
         self.walk_frame_timer.stop()
         self.jump_loop_timer.stop()
 
+        # _on_state 触发时 brain.state 已经是新值，用 _prev_brain_state 判断"刚睡醒"
+        old = self._prev_brain_state
+        self._prev_brain_state = s
+        hidden = self._edge_state == "hidden"
+
+        if s == PetBrain.SLEEP:
+            # 需求3：睡着滑到最近屏幕边缘完整可见（已处于收缝则保持原状）
+            self._start_sleep_side()
+        elif old == PetBrain.SLEEP:
+            # 刚睡醒：睡在哪醒在哪（1.7.0 用户选择不回位）；刷新空闲计时，
+            # 否则醒来瞬间又因超时被贴边收缝
+            self._sleep_side = False
+            if self._slide_anim is not None:
+                self._slide_anim.stop()
+                self._slide_anim = None
+            self._mark_movement()
+
+        if s in (PetBrain.WALK, PetBrain.JUMP, PetBrain.WANDER) and self._edge_state == "hiding":
+            # 收缝动画中大脑决定要活动：取消收缝原地活动，别让滑向边缘的
+            # 动画继续把窗口拽走（walk 的 move 与收缝动画会互相拉扯）
+            if self._edge_anim is not None:
+                self._edge_anim.stop()
+                self._edge_anim = None
+            self._edge_state = "normal"
+
         if s == PetBrain.WALK:
-            self._walk_dir = random.choice([-1, 1])
-            self.walk_timer.start()
-            self.walk_frame_timer.start()
+            # 收缝（hidden）期间不迈步：等点击/提醒唤出后再走，否则宠物会
+            # 自己从隐藏缝里走出来，违背"隐藏后不自动出来"
+            if not hidden:
+                self._walk_dir = random.choice([-1, 1])
+                self.walk_timer.start()
+                self.walk_frame_timer.start()
         elif s == PetBrain.JUMP:
-            self._do_jump()
-            self.jump_loop_timer.start()
+            if not hidden:
+                self._do_jump()
+                self.jump_loop_timer.start()
         elif s == PetBrain.CHAT:
-            self._chat()
+            if not hidden:
+                self._chat()
         elif s == PetBrain.WANDER:
-            self._wander()
+            if not hidden:
+                self._wander()
 
         self._blinking = s == PetBrain.SLEEP
-        # 切换动作时按冷却弹台词气泡
-        self._emit_action_quote(s)
+        # 切换动作时按冷却弹台词气泡（收缝里不弹，避免气泡从缝里冒出来）
+        if not hidden:
+            self._emit_action_quote(s)
 
     def _emit_action_quote(self, state: str) -> None:
         """状态切换时按冷却弹动作台词（避免频繁刷屏）。"""
@@ -406,11 +455,17 @@ class PetWindow(QWidget):
             return  # 气泡正显示，不覆盖
         self._show_bubble(random.choice(msgs), 4000)
 
-    def _do_jump(self, dx=None) -> None:
+    def _jump_height(self) -> int:
+        """自发跳跃高度按活跃度缩放：低活跃轻轻蹦（14px），高活跃蹦更高（44px）。"""
+        return int(round(PetBrain._scale(self._activity, 14.0, 26.0, 44.0)))
+
+    def _do_jump(self, dx=None, *, interactive: bool = False) -> None:
         if dx is None:
             dx = random.randint(-24, 24)
+        # 自发跳跃随活跃度缩放；点击/双击这类用户互动保持固定高度，回应不打折
+        height = 26 if interactive else self._jump_height()
         self._jumping = True
-        anim = jump_animation(self, dx)
+        anim = jump_animation(self, dx, height=height)
         anim.finished.connect(self._save_pos)
         anim.start()
         QTimer.singleShot(400, self._end_jump)
@@ -440,6 +495,11 @@ class PetWindow(QWidget):
         anim.finished.connect(self._save_pos)
         anim.start()
 
+    def refresh_activity(self) -> None:
+        """托盘调节活跃度后调用：刷新窗口侧缓存，并让状态机按新参数重新计时。"""
+        self._activity = config.activity()
+        self.brain.reschedule()
+
     # ---------- 拖拽 / 点击 ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -448,8 +508,14 @@ class PetWindow(QWidget):
             self._win_origin = self.pos()
             self._moved = False
             if self._edge_state == "hidden":
-                # 用户点击露出的部分：直接滑回原位
+                # 需求2：收缝后手动唤出的唯一途径之一——点击露出的那条边
                 self._begin_edge_show()
+            elif self._sleep_side:
+                # 用户按住睡着靠边的宠物：靠边契约作废，位置改由拖动接管
+                self._sleep_side = False
+                if self._slide_anim is not None:
+                    self._slide_anim.stop()
+                    self._slide_anim = None
             e.accept()
 
     def mouseMoveEvent(self, e):
@@ -501,7 +567,7 @@ class PetWindow(QWidget):
             super().contextMenuEvent(e)
 
     def _do_single_click(self) -> None:
-        self._do_jump()
+        self._do_jump(interactive=True)
         if random.random() < 0.5:
             self._say(config.get_click_messages())
 
@@ -519,7 +585,7 @@ class PetWindow(QWidget):
         if "laugh" in self.frames:
             self._override_frame = "laugh"
             self._override_until = time.time() * 1000 + 1500
-        self._do_jump()
+        self._do_jump(interactive=True)
         self._say(config.get_happy_messages())
 
     def _say(self, messages) -> None:
@@ -547,8 +613,6 @@ class PetWindow(QWidget):
         """用户关闭贴边隐藏时调用：停掉定时器，若处于贴边则滑回原位。"""
         if self._edge_hide_idle_timer is not None:
             self._edge_hide_idle_timer.stop()
-        if self._edge_hide_check_timer is not None:
-            self._edge_hide_check_timer.stop()
         if self._edge_state in ("hidden", "hiding"):
             self._begin_edge_show()
         else:
@@ -565,16 +629,16 @@ class PetWindow(QWidget):
             return
         if self._edge_state in ("hiding", "showing"):
             return
+        # 睡觉中 / 睡着靠边中不触发收缝：睡眠已把宠物带到屏幕边缘完整可见，
+        # 不需要再缩成一条缝
+        if self._sleep_side or self.brain.state == PetBrain.SLEEP:
+            return
         if self._edge_state == "normal":
             if self._jumping or self._drag:
                 return
             if time.time() - self._last_move_time > config.EDGE_HIDE_IDLE_SECONDS:
                 self._begin_edge_hide()
-        elif self._edge_state == "hidden":
-            # 鼠标在窗口几何外扩 30px 内即触发滑回
-            geom = self.geometry().adjusted(-30, -30, 30, 30)
-            if geom.contains(QCursor.pos()):
-                self._begin_edge_show()
+        # 1.7.0：hidden 态不再检查鼠标靠近自动滑回——只有手动点击或提醒才唤出
 
     def _begin_edge_hide(self) -> None:
         """贴边：找最近的屏幕边缘，滑过去只露 20px。"""
@@ -601,27 +665,77 @@ class PetWindow(QWidget):
         self._anim_to(tx, ty, 600, on_finish=self._on_hide_arrived)
 
     def _on_hide_arrived(self) -> None:
-        """贴边动画完成：启动鼠标位置轮询，等待用户靠近。"""
+        """贴边动画完成：进入 hidden 态。
+
+        1.7.0 起不再启动鼠标位置轮询——隐藏后只有手动点击（_begin_edge_show）
+        或提醒（_begin_reminder）两条唤出途径。
+        """
         self._edge_state = "hidden"
-        if self._edge_hide_check_timer is None:
-            self._edge_hide_check_timer = QTimer(self)
-            self._edge_hide_check_timer.setInterval(200)
-            self._edge_hide_check_timer.timeout.connect(self._check_edge_hide)
-        self._edge_hide_check_timer.start()
 
     def _begin_edge_show(self) -> None:
-        """滑回用户最近显式拖到的位置。"""
-        if self._edge_hide_check_timer is not None:
-            self._edge_hide_check_timer.stop()
+        """需求2：点击露出的隐藏缝时，滑回最近一次显式停留的位置。"""
         self._edge_state = "showing"
         self._anim_to(
             self._last_user_pos.x(),
             self._last_user_pos.y(),
             500,
-            on_finish=lambda: setattr(self, "_edge_state", "normal"),
+            on_finish=self._on_show_arrived,
         )
 
-    def _anim_to(self, tx: int, ty: int, duration: int, on_finish=None) -> None:
+    def _on_show_arrived(self) -> None:
+        """滑回完成：恢复正常态，并恢复收缝期间被暂停的走动/散步。"""
+        self._edge_state = "normal"
+        self._resume_if_locomoting()
+
+    def _resume_if_locomoting(self) -> None:
+        """从收缝唤出后，恢复收缝期间被暂停的走动/散步/自发跳跃。"""
+        s = self.brain.state
+        if s == PetBrain.WALK and not self.walk_timer.isActive():
+            self.walk_timer.start()
+            self.walk_frame_timer.start()
+        elif s == PetBrain.WANDER:
+            self._wander()
+        elif s == PetBrain.JUMP and not self._jumping:
+            self._do_jump()
+            self.jump_loop_timer.start()
+
+    def _start_sleep_side(self) -> None:
+        """需求3：入睡时若处于普通位置，滑到最近屏幕边缘完整可见地睡觉。
+
+        唤醒后"睡在哪醒在哪"（用户选择，不回位）；若入睡时已处于贴边收缝
+        （hidden/hiding）则保持原状，避免和收缝逻辑打架。
+        """
+        if self._sleep_side or self._edge_state != "normal":
+            return
+        if self._drag or self._jumping:
+            return
+        screen = QApplication.primaryScreen().availableGeometry()
+        x, y, w, h = self.x(), self.y(), self.width(), self.height()
+        distances = {
+            "left": abs(x - screen.left()),
+            "right": abs(screen.right() - (x + w)),
+            "top": abs(y - screen.top()),
+            "bottom": abs(screen.bottom() - (y + h)),
+        }
+        nearest = min(distances, key=distances.get)
+        tx, ty = x, y
+        if nearest == "left":
+            tx = screen.left()
+        elif nearest == "right":
+            tx = screen.right() - w
+        elif nearest == "top":
+            ty = screen.top()
+        else:
+            ty = screen.bottom() - h
+        self._sleep_side = True
+        if tx == x and ty == y:
+            return  # 已在边缘完整可见，无需移动
+        self._slide_anim = self._anim_to(tx, ty, 800)
+
+    def _anim_to(self, tx: int, ty: int, duration: int, on_finish=None):
+        """平移窗口到 (tx,ty)；返回动画对象。先停掉上一个平移动画避免互相拉扯。"""
+        if self._edge_anim is not None:
+            self._edge_anim.stop()
         anim = QPropertyAnimation(self, b"pos", self)
         anim.setDuration(duration)
         anim.setStartValue(self.pos())
@@ -631,6 +745,7 @@ class PetWindow(QWidget):
             anim.finished.connect(on_finish)
         anim.start()
         self._edge_anim = anim
+        return anim
 
     # ---------- 位置 ----------
     def _restore_pos(self) -> None:
@@ -755,7 +870,17 @@ class PetWindow(QWidget):
         return config.is_silent_now()
 
     def _begin_reminder(self) -> bool:
-        """提醒开始：若在睡觉则唤醒，返回原本是否在睡。"""
+        """提醒开始：若藏在屏幕边缘（收缝）则先还原；若在睡觉则唤醒。返回原本是否在睡。
+
+        需求2：收缝（hidden/hiding）只有手动点击或提醒两条唤出途径，提醒走这里。
+        瞬间回到最近停留的位置（不做滑回动画），避免和随后的跳跃/移动动画抢窗口。
+        """
+        if self._edge_state in ("hidden", "hiding"):
+            self._edge_state = "normal"
+            if self._edge_anim is not None:
+                self._edge_anim.stop()
+                self._edge_anim = None
+            self.move(self._last_user_pos.x(), self._last_user_pos.y())
         was = self.brain.state == PetBrain.SLEEP
         if was:
             self.brain.wake()

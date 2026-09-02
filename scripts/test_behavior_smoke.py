@@ -67,6 +67,7 @@ def press_release(window, etype):
 
 def main() -> int:
     from pet import config
+    from pet.brain import PetBrain
     from pet.window import PetWindow
 
     app = QApplication(sys.argv)
@@ -79,9 +80,9 @@ def main() -> int:
     jump_calls = {"n": 0}
     orig_jump = window._do_jump
 
-    def counting_jump():
+    def counting_jump(*args, **kwargs):
         jump_calls["n"] += 1
-        orig_jump()
+        orig_jump(*args, **kwargs)
 
     window._do_jump = counting_jump
 
@@ -155,6 +156,8 @@ def main() -> int:
         old = config.get("edge_hide_enabled")
         config.set_value("edge_hide_enabled", True)
         try:
+            # 1.7.0：睡觉/睡着靠边时不触发收缝，先 poke 醒再测静止超时
+            window.brain.poke()
             window._edge_state = "normal"
             window._jumping = False
             window._drag = False
@@ -166,6 +169,7 @@ def main() -> int:
         finally:
             config.set_value("edge_hide_enabled", old)
             window._edge_state = "normal"
+            window._edge_anim = None
 
     check("静止超时进入隐藏动画", t_edge_hide)
 
@@ -173,6 +177,7 @@ def main() -> int:
         old = config.get("edge_hide_enabled")
         config.set_value("edge_hide_enabled", False)
         try:
+            window.brain.poke()
             window._edge_state = "normal"
             window._last_move_time = time.time() - 9999
             window._check_edge_hide()
@@ -181,6 +186,168 @@ def main() -> int:
             config.set_value("edge_hide_enabled", old)
 
     check("关闭贴边隐藏则不触发", t_edge_disabled)
+
+    def t_sleep_no_hide():
+        """1.7.0：睡着时即使静止超时也不收缝（睡觉本身已滑到边缘完整可见）。"""
+        old = config.get("edge_hide_enabled")
+        config.set_value("edge_hide_enabled", True)
+        try:
+            window.brain.poke()
+            window._edge_state = "normal"
+            window.brain.go_sleep()  # 触发 _on_state(SLEEP) → 睡眠靠边
+            window._last_move_time = time.time() - 9999
+            window._check_edge_hide()
+            assert_true(window._edge_state == "normal", "睡着时不应触发收缝")
+        finally:
+            window.brain.wake()
+            window._sleep_side = False
+            window._slide_anim = None
+            config.set_value("edge_hide_enabled", old)
+
+    check("睡着时不触发贴边收缝", t_sleep_no_hide)
+
+    def t_hidden_no_auto_show():
+        """需求2：隐藏后鼠标靠近不再自动滑回；_check_edge_hide 对 hidden 无操作。"""
+        window.brain.poke()
+        window._edge_state = "hidden"
+        window._check_edge_hide()  # 旧版会因光标在几何+30px 内自动 _begin_edge_show
+        assert_true(window._edge_state == "hidden", "hidden 不应因 idle 检查自动滑回")
+        assert_true(
+            not hasattr(window, "_edge_hide_check_timer"),
+            "鼠标轮询定时器字段应已删除",
+        )
+
+    check("隐藏后不自动滑回", t_hidden_no_auto_show)
+
+    def t_hidden_click_show():
+        """需求2：点击露出的隐藏缝 → 进入 showing 滑回。"""
+        window.brain.poke()
+        window._last_user_pos = QPoint(123, 200)
+        window._edge_state = "hidden"
+        press_release(window, QEvent.Type.MouseButtonRelease)
+        assert_true(window._edge_state == "showing", f"点击隐藏缝应滑回，实际 {window._edge_state}")
+        # 收尾：停掉动画，恢复正常态，避免影响后续用例
+        if window._edge_anim is not None:
+            window._edge_anim.stop()
+            window._edge_anim = None
+        window._edge_state = "normal"
+
+    check("点击隐藏缝唤出", t_hidden_click_show)
+
+    def t_reminder_restores_from_hidden():
+        """需求2：提醒唤出收缝——瞬间回到最近停留位置再提醒。"""
+        window.brain.poke()
+        window._last_user_pos = QPoint(321, 400)
+        window.move(700, 500)
+        window._edge_state = "hidden"
+        was = window._begin_reminder()
+        assert_true(window._edge_state == "normal", "提醒应把状态还原为 normal")
+        assert_true(
+            window.pos().x() == 321 and window.pos().y() == 400,
+            f"提醒应回到最近停留位置，实际 {window.pos().x()},{window.pos().y()}",
+        )
+
+    check("提醒唤出收缝并回原位", t_reminder_restores_from_hidden)
+
+    print("[9] 需求3：睡觉自动靠边（完整可见），醒来就地活动")
+
+    def t_sleep_side():
+        screen = app.primaryScreen().availableGeometry()
+        w, h = window.width(), window.height()
+        window.brain.poke()
+        window._edge_state = "normal"
+        window._sleep_side = False
+        window._slide_anim = None
+        window.move(300, 300)
+        window.brain.go_sleep()
+        assert_true(window._sleep_side, "入睡应标记睡眠靠边")
+        anim = window._slide_anim
+        assert_true(anim is not None, "入睡应启动滑向边缘的动画")
+        end = anim.endValue()
+        # 目标必须在某个屏幕边缘且完整可见
+        ex, ey = end.x(), end.y()
+        on_edge = (
+            ex == screen.left() or ex == screen.right() - w
+            or ey == screen.top() or ey == screen.bottom() - h
+        )
+        assert_true(on_edge, f"滑动目标应在屏幕边缘：{ex},{ey}")
+        assert_true(
+            screen.left() <= ex <= screen.right() - w and screen.top() <= ey <= screen.bottom() - h,
+            f"目标应完整可见：{ex},{ey}",
+        )
+
+    check("入睡滑向边缘完整可见", t_sleep_side)
+
+    def t_wake_in_place():
+        """醒来"睡在哪醒在哪"：清靠边标记，不起滑回原位动画。"""
+        window.brain.poke()
+        window._edge_state = "normal"
+        window.brain.go_sleep()
+        assert_true(window._sleep_side, "前置：应处于睡眠靠边")
+        window.brain.wake()  # 自然醒/点击/提醒都走这里
+        assert_true(not window._sleep_side, "醒来应清除靠边标记")
+        assert_true(window._slide_anim is None, "醒来不应再有滑向边缘的动画")
+
+    check("醒来就地活动不清除位置", t_wake_in_place)
+
+    def t_sleep_hidden_no_side():
+        """已在收缝（hidden）时入睡：保持原状，不触发睡眠靠边。"""
+        window.brain.poke()
+        window._edge_state = "hidden"
+        window._sleep_side = False
+        window.brain.go_sleep()
+        assert_true(not window._sleep_side, "收缝中入睡不应触发睡眠靠边")
+        window.brain.wake()
+        window._sleep_side = False
+
+    check("收缝中入睡不靠边", t_sleep_hidden_no_side)
+
+    print("[10] 需求4：活跃度联动")
+
+    _orig_act = config.activity()
+
+    def set_act(v):
+        config.set_value("activity", v)
+        window.refresh_activity()
+
+    def t_act_jump():
+        set_act(0)
+        assert_true(window._jump_height() < 20, f"低活跃跳跃应偏矮：{window._jump_height()}")
+        set_act(50)
+        assert_true(window._jump_height() == 26, f"默认活跃跳跃应为 26：{window._jump_height()}")
+        set_act(100)
+        assert_true(window._jump_height() > 30, f"高活跃跳跃应更高：{window._jump_height()}")
+
+    check("跳跃高度随活跃度缩放", t_act_jump)
+
+    def t_act_walk():
+        set_act(0)
+        assert_true(window._walk_step() == 1, f"低活跃步速应 1px：{window._walk_step()}")
+        set_act(50)
+        assert_true(window._walk_step() == 2, f"默认步速应 2px：{window._walk_step()}")
+        set_act(100)
+        assert_true(window._walk_step() == 3, f"高活跃步速应 3px：{window._walk_step()}")
+
+    check("散步步速随活跃度缩放", t_act_walk)
+
+    def t_act_brain():
+        # 睡眠越长 = 越爱睡；回睡概率越大；清醒越短
+        set_act(0)
+        s0 = window.brain._dur_range(PetBrain.SLEEP)
+        p0 = window.brain._resleep_prob()
+        a0 = window.brain._awake_actions()
+        set_act(100)
+        s100 = window.brain._dur_range(PetBrain.SLEEP)
+        p100 = window.brain._resleep_prob()
+        a100 = window.brain._awake_actions()
+        assert_true(s0[0] > s100[0] and s0[1] > s100[1], f"低活跃应睡得久：{s0} vs {s100}")
+        assert_true(p0 > p100, f"低活跃应更容易回睡：{p0} vs {p100}")
+        assert_true(window.brain.WALK in a0 or window.brain.CHAT in a0, "低活跃仍有安静活动")
+        assert_true(len(a100) >= len(a0), "高活跃动作池不应比低活跃小")
+        set_act(50)
+
+    check("脑状态机按时长/回睡概率联动", t_act_brain)
+    set_act(_orig_act)
 
     print("[5] 提醒计时互相独立")
 
